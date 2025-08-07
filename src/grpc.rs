@@ -6,7 +6,7 @@ use futures::StreamExt;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::predict_one;
+use crate::predict_one_safe;
 
 #[allow(non_camel_case_types)]
 mod proto {
@@ -36,14 +36,38 @@ impl server::FasttextServing for FastTextServingService {
         futures::pin_mut!(stream);
         let model = self.model.clone();
         let mut predictions = Vec::new();
+        let mut processed_count = 0;
+        let mut error_count = 0;
+        
         while let Some(req) = stream.next().await {
             let req = req?;
             let text = req.text;
             let k = req.k.unwrap_or(1);
             let threshold = req.threshold.unwrap_or(0.0);
-            let (labels, probs) = predict_one(&model, &text, k, threshold);
-            predictions.push(Prediction { labels, probs });
+            
+            match predict_one_safe(&model, &text, k, threshold) {
+                Ok((labels, probs)) => {
+                    predictions.push(Prediction { labels, probs });
+                    processed_count += 1;
+                }
+                Err(e) => {
+                    log::warn!("gRPC prediction failed for text (length: {}): {}", text.len(), e);
+                    // 返回错误标记而不是失败整个请求
+                    predictions.push(Prediction { 
+                        labels: vec!["error".to_string()], 
+                        probs: vec![0.0] 
+                    });
+                    error_count += 1;
+                }
+            }
         }
+        
+        if error_count > 0 {
+            log::warn!("gRPC batch processing completed with {} errors out of {} texts", error_count, processed_count + error_count);
+        } else {
+            log::info!("gRPC batch processing completed successfully: {} texts", processed_count);
+        }
+        
         Ok(Response::new(PredictResponse { predictions }))
     }
 
@@ -55,14 +79,33 @@ impl server::FasttextServing for FastTextServingService {
         futures::pin_mut!(stream);
         let mut vectors = Vec::new();
         let model = self.model.clone();
+        let mut processed_count = 0;
+        let mut error_count = 0;
+        
         while let Some(req) = stream.next().await {
             let req = req?;
             let text = req.text;
-            let values = model
-                .get_sentence_vector(&text)
-                .expect("get_sentence_vector failed");
-            vectors.push(SentenceVector { values });
+            
+            match model.get_sentence_vector(&text) {
+                Ok(values) => {
+                    vectors.push(SentenceVector { values });
+                    processed_count += 1;
+                }
+                Err(e) => {
+                    log::warn!("gRPC sentence vector failed for text (length: {}): {}", text.len(), e);
+                    // 返回零向量而不是失败
+                    vectors.push(SentenceVector { values: vec![0.0; 100] });
+                    error_count += 1;
+                }
+            }
         }
+        
+        if error_count > 0 {
+            log::warn!("gRPC sentence vector processing completed with {} errors out of {} texts", error_count, processed_count + error_count);
+        } else {
+            log::info!("gRPC sentence vector processing completed successfully: {} texts", processed_count);
+        }
+        
         Ok(Response::new(SentenceVectorResponse { vectors }))
     }
 }
