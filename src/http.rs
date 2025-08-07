@@ -188,12 +188,13 @@ pub(crate) fn runserver(model: FastText, address: &str, port: u16, workers: usiz
         .limit(500_000_000) // 500MB - 比原来的20MB提升25倍
         .content_type(|_mime| true) // Accept any content type
         .error_handler(|err, _req| {
+            let error_message = format!("Failed to parse JSON: {}", err);
             log::error!("JSON parsing error: {}", err);
             actix_web::error::InternalError::from_response(
                 err,
                 HttpResponse::BadRequest().json(ErrorResponse {
                     error: "json_parse_error".to_string(),
-                    message: format!("Failed to parse JSON: {}", err),
+                    message: error_message,
                 })
             ).into()
         });
