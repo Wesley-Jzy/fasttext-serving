@@ -24,6 +24,7 @@ use proto::{
 #[derive(Debug, Clone)]
 struct FastTextServingService {
     model: Arc<FastText>,
+    config: Arc<crate::ServerConfig>,
 }
 
 #[tonic::async_trait]
@@ -43,9 +44,9 @@ impl server::FasttextServing for FastTextServingService {
             let req = req?;
             let text = req.text;
             let k = req.k.unwrap_or(1);
-            let threshold = req.threshold.unwrap_or(0.0);
+            let threshold = req.threshold.unwrap_or(self.config.default_threshold);
             
-            match predict_one_safe(&model, &text, k, threshold) {
+            match crate::predict_one_safe(&model, &text, k, threshold, self.config.max_text_length) {
                 Ok((labels, probs)) => {
             predictions.push(Prediction { labels, probs });
                     processed_count += 1;
@@ -94,7 +95,7 @@ impl server::FasttextServing for FastTextServingService {
                 Err(e) => {
                     log::warn!("gRPC sentence vector failed for text (length: {}): {}", text.len(), e);
                     // 返回零向量而不是失败
-                    vectors.push(SentenceVector { values: vec![0.0; 100] });
+                    vectors.push(SentenceVector { values: vec![0.0; self.config.default_vector_dim] });
                     error_count += 1;
                 }
             }
@@ -110,13 +111,14 @@ impl server::FasttextServing for FastTextServingService {
     }
 }
 
-pub(crate) fn runserver(model: FastText, address: &str, port: u16, num_threads: usize) {
+pub(crate) fn runserver(model: FastText, address: &str, port: u16, num_threads: usize, config: crate::ServerConfig) {
     let reflection_service = tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
         .build()
         .unwrap();
     let instance = FastTextServingService {
         model: Arc::new(model),
+        config: Arc::new(config),
     };
     let service = server::FasttextServingServer::new(instance);
     let addr = (address, port).to_socket_addrs().unwrap().next().unwrap();

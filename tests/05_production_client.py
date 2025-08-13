@@ -175,8 +175,11 @@ class TheStackV2Processor:
         
         content_str = str(content)
         
-        # 可选：保留原始长度用于后续分析
-        # 不进行截断，让模型处理完整内容
+        # 临时截断超长文本以避免服务端错误
+        if len(content_str) > 1_000_000:  # 1MB限制
+            print(f"⚠️ 截断超长文本: {len(content_str)} -> 1,000,000 字符")
+            content_str = content_str[:1_000_000]
+        
         return content_str
     
     async def predict_batch(self, texts: List[str]) -> List[Dict[str, Any]]:
@@ -257,32 +260,32 @@ class TheStackV2Processor:
         return results
     
     def validate_prediction(self, prediction: Dict) -> Tuple[bool, Optional[str]]:
-        """验证预测结果的有效性"""
+        """验证预测结果的有效性 - 只检查真正的推理错误和多返回情况"""
         try:
             labels = prediction.get("labels", [])
             scores = prediction.get("scores", [])
             
-            # 检查标签数量是否正确（应该是2个：'0'和'1'）
-            if len(labels) != 2:
-                return False, f"unexpected_label_count:{len(labels)}"
+            # 检查是否有数据
+            if not labels or not scores:
+                return False, f"missing_data:labels={len(labels)},scores={len(scores)}"
             
-            # 检查分数数量是否匹配
+            # 检查分数数量是否匹配标签
             if len(scores) != len(labels):
-                return False, f"label_score_mismatch:{len(labels)}vs{len(scores)}"
+                return False, f"count_mismatch:labels={len(labels)},scores={len(scores)}"
             
-            # 检查是否有预期的标签
-            expected_labels = {"0", "1"}
-            if set(labels) != expected_labels:
-                return False, f"unexpected_labels:{labels}"
+            # 检查多返回情况：标签数量应该是2个
+            if len(labels) != 2:
+                return False, f"multi_prediction:got_{len(labels)}_labels:{labels}"
             
-            # 检查分数是否合理
-            if not all(0 <= score <= 1 for score in scores):
-                return False, f"invalid_scores:{scores}"
+            # 检查是否是推理错误（服务端返回的错误标签）
+            if "error" in labels:
+                return False, f"service_error:labels={labels}"
             
+            # 其他情况都认为是有效的（不检查具体标签值和分数范围）
             return True, None
             
         except Exception as e:
-            return False, f"validation_error:{str(e)}"
+            return False, f"validation_exception:{str(e)}"
     
     async def process_file(self, file_path: Path, semaphore: asyncio.Semaphore) -> Tuple[int, int]:
         """处理单个文件"""

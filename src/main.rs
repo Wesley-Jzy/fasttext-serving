@@ -33,19 +33,28 @@ impl std::fmt::Display for PredictError {
 
 impl std::error::Error for PredictError {}
 
+#[derive(Clone)]
+pub struct ServerConfig {
+    pub max_text_length: usize,
+    pub default_threshold: f32,
+    pub default_vector_dim: usize,
+    pub max_request_size_mb: u32,
+}
+
 #[inline]
 pub fn predict_one_safe(
     model: &FastText,
     text: &str,
     k: u32,
     threshold: f32,
+    max_text_length: usize,
 ) -> Result<(Vec<String>, Vec<f32>), PredictError> {
     // Validate input
     if text.is_empty() {
         return Err(PredictError::InputError("Empty text input".to_string()));
     }
     
-    if text.len() > 1_000_000 { // 1MB per text limit
+    if text.len() > max_text_length {
         return Err(PredictError::InputError(format!("Text too long: {} bytes", text.len())));
     }
     
@@ -83,8 +92,9 @@ pub fn predict_one(
     text: &str,
     k: u32,
     threshold: f32,
+    max_text_length: usize,
 ) -> (Vec<String>, Vec<f32>) {
-    match predict_one_safe(model, text, k, threshold) {
+    match predict_one_safe(model, text, k, threshold, max_text_length) {
         Ok(result) => result,
         Err(e) => {
             log::error!("Prediction failed, returning default result: {}", e);
@@ -152,6 +162,27 @@ fn main() {
                 .num_args(1)
                 .help("Maximum request size in MB (default: 500MB)"),
         )
+        .arg(
+            Arg::new("max-text-length")
+                .long("max-text-length")
+                .default_value("5000000")
+                .num_args(1)
+                .help("Maximum text length in bytes (default: 5MB)"),
+        )
+        .arg(
+            Arg::new("default-threshold")
+                .long("default-threshold")
+                .default_value("0.0")
+                .num_args(1)
+                .help("Default prediction threshold (default: 0.0)"),
+        )
+        .arg(
+            Arg::new("default-vector-dim")
+                .long("default-vector-dim")
+                .default_value("100")
+                .num_args(1)
+                .help("Default sentence vector dimension for errors (default: 100)"),
+        )
         .get_matches();
         
     let model_path = matches.get_one::<String>("model").unwrap();
@@ -170,6 +201,15 @@ fn main() {
     let max_request_size = matches
         .get_one::<String>("max-request-size")
         .expect("missing max-request-size");
+    let max_text_length = matches
+        .get_one::<String>("max-text-length")
+        .expect("missing max-text-length");
+    let default_threshold = matches
+        .get_one::<String>("default-threshold")
+        .expect("missing default-threshold");
+    let default_vector_dim = matches
+        .get_one::<String>("default-vector-dim")
+        .expect("missing default-vector-dim");
         
     log::info!("Loading FastText model from: {}", model_path);
     let mut model = FastText::new();
@@ -197,13 +237,35 @@ fn main() {
         log::error!("Invalid max request size: {}", max_request_size);
         std::process::exit(1);
     });
+    let _max_text_length_bytes: usize = max_text_length.parse().unwrap_or_else(|_| {
+        log::error!("Invalid max text length: {}", max_text_length);
+        std::process::exit(1);
+    });
+    let _default_threshold: f32 = default_threshold.parse().unwrap_or_else(|_| {
+        log::error!("Invalid default threshold: {}", default_threshold);
+        std::process::exit(1);
+    });
+    let _default_vector_dim: usize = default_vector_dim.parse().unwrap_or_else(|_| {
+        log::error!("Invalid default vector dim: {}", default_vector_dim);
+        std::process::exit(1);
+    });
     
     log::info!("Starting server with {} workers on {}:{}", workers, address, port);
     log::info!("Maximum request size: {}MB", _max_request_size_mb);
+    log::info!("Maximum text length: {} bytes", _max_text_length_bytes);
+    log::info!("Default threshold: {}", _default_threshold);
+    log::info!("Default vector dimension: {}", _default_vector_dim);
     
+    let config = ServerConfig {
+        max_text_length: _max_text_length_bytes,
+        default_threshold: _default_threshold,
+        default_vector_dim: _default_vector_dim,
+        max_request_size_mb: _max_request_size_mb,
+    };
+
     if matches.get_flag("grpc") {
         #[cfg(feature = "grpc")]
-        crate::grpc::runserver(model, address, port, workers);
+        crate::grpc::runserver(model, address, port.parse().unwrap(), workers, config);
         #[cfg(not(feature = "grpc"))]
         {
             log::error!("gRPC support is not enabled!");
@@ -211,7 +273,7 @@ fn main() {
         }
     } else {
         #[cfg(feature = "http")]
-        crate::http::runserver(model, address, port, workers);
+        crate::http::runserver(model, address, port.parse().unwrap(), workers, config);
         #[cfg(not(feature = "http"))]
         {
             log::error!("HTTP support is not enabled!");

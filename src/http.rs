@@ -85,11 +85,12 @@ async fn health_check() -> ActixResult<HttpResponse> {
 
 async fn predict(
     model: web::Data<FastText>,
+    config: web::Data<crate::ServerConfig>,
     texts: web::Json<Vec<String>>,
     options: web::Query<PredictOptions>,
 ) -> ActixResult<HttpResponse> {
     let k = options.k.unwrap_or(1);
-    let threshold = options.threshold.unwrap_or(0.0);
+    let threshold = options.threshold.unwrap_or(config.default_threshold);
     let text_count = texts.len();
     
     log::info!("Processing {} texts with k={}, threshold={}", text_count, k, threshold);
@@ -104,7 +105,7 @@ async fn predict(
     let mut error_count = 0;
     
     for txt in texts.iter() {
-        match predict_one_safe(model.get_ref(), txt, k, threshold) {
+        match crate::predict_one_safe(model.get_ref(), txt, k, threshold, config.max_text_length) {
             Ok((labels, probs)) => {
                 results.push(PredictResult {
                     labels,
@@ -141,6 +142,7 @@ async fn predict(
 
 async fn sentence_vector(
     model: web::Data<FastText>,
+    config: web::Data<crate::ServerConfig>,
     texts: web::Json<Vec<String>>,
 ) -> ActixResult<HttpResponse> {
     let text_count = texts.len();
@@ -163,7 +165,7 @@ async fn sentence_vector(
             Err(e) => {
                 log::warn!("Sentence vector failed for text (length: {}): {}", txt.len(), e);
                 // 返回零向量而不是失败
-                results.push(vec![0.0; 100]); // 假设向量维度为100，实际应该根据模型确定
+                results.push(vec![0.0; config.default_vector_dim]); // 使用配置的向量维度
                 error_count += 1;
             }
         }
@@ -178,14 +180,15 @@ async fn sentence_vector(
     Ok(HttpResponse::Ok().json(results))
 }
 
-pub(crate) fn runserver(model: FastText, address: &str, port: u16, workers: usize) {
+pub(crate) fn runserver(model: FastText, address: &str, port: u16, workers: usize, config: crate::ServerConfig) {
     let addr = Address::from((address, port));
     log::info!("Listening on {}", addr);
     let model_data = web::Data::new(model);
+    let config_data = web::Data::new(config.clone());
     
-    // 大幅提升JSON限制到500MB，适合大规模批处理
+    // 使用配置参数设置JSON限制
     let json_cfg = web::JsonConfig::default()
-        .limit(500_000_000) // 500MB - 比原来的20MB提升25倍
+        .limit((config.max_request_size_mb as usize) * 1_000_000) // MB转换为bytes
         .content_type(|_mime| true) // Accept any content type
         .error_handler(|err, _req| {
             let error_message = format!("Failed to parse JSON: {}", err);
@@ -204,12 +207,14 @@ pub(crate) fn runserver(model: FastText, address: &str, port: u16, workers: usiz
             .service(
                 web::resource("/predict")
                     .app_data(model_data.clone())
+                    .app_data(config_data.clone())
                     .app_data(json_cfg.clone())
                     .route(web::post().to(predict)),
             )
             .service(
                 web::resource("/sentence-vector")
                     .app_data(model_data.clone())
+                    .app_data(config_data.clone())
                     .app_data(json_cfg.clone())
                     .route(web::post().to(sentence_vector)),
             )
