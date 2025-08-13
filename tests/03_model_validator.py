@@ -1,192 +1,208 @@
 #!/usr/bin/env python3
 """
 模型验证脚本
-测试FastText模型加载、二分类功能、性能表现
+通过HTTP API测试FastText服务中的模型功能、二分类能力、性能表现
 """
 import os
 import sys
 import time
 import json
-from typing import List, Tuple, Dict, Any
+import requests
+from typing import List, Dict, Any
 
-def test_fasttext_import():
-    """测试FastText库导入"""
-    print("📦 测试FastText库")
+def test_http_client():
+    """测试HTTP客户端库"""
+    print("📦 测试HTTP客户端库")
     
     try:
-        import fasttext
-        print(f"✅ FastText导入成功")
-        if hasattr(fasttext, '__version__'):
-            print(f"  版本: {fasttext.__version__}")
+        import requests
+        import aiohttp
+        print(f"✅ HTTP客户端库导入成功")
+        print(f"  requests: 已安装")
+        print(f"  aiohttp: 已安装")
         return True
     except ImportError as e:
-        print(f"❌ FastText导入失败: {e}")
+        print(f"❌ HTTP客户端库导入失败: {e}")
         return False
 
-def load_model(model_path: str):
-    """加载FastText模型"""
-    print(f"🤖 加载模型: {model_path}")
+def check_model_file(model_path: str):
+    """检查模型文件是否存在（在马来环境中）"""
+    print(f"🤖 检查模型文件: {model_path}")
     
     if not os.path.exists(model_path):
         print(f"❌ 模型文件不存在")
-        return None
+        return False
     
     try:
-        import fasttext
-        start_time = time.time()
-        model = fasttext.load_model(model_path)
-        load_time = time.time() - start_time
-        
-        print(f"✅ 模型加载成功 ({load_time:.2f}秒)")
-        return model
+        size_mb = os.path.getsize(model_path) / (1024*1024)
+        print(f"✅ 模型文件存在")
+        print(f"  文件大小: {size_mb:.1f}MB")
+        return True
     except Exception as e:
-        print(f"❌ 模型加载失败: {e}")
-        return None
+        print(f"❌ 无法访问模型文件: {e}")
+        return False
 
-def analyze_model_info(model):
-    """分析模型基本信息"""
-    print("🔍 模型信息分析")
+def test_service_with_model(service_url: str = "http://localhost:8000") -> Dict[str, Any]:
+    """通过HTTP API测试服务中的模型"""
+    print(f"🌐 测试服务模型功能: {service_url}")
     
-    if model is None:
-        return {}
-    
+    # 1. 健康检查
     try:
-        # 获取标签
-        labels = model.get_labels()
-        print(f"📋 模型标签: {labels}")
-        print(f"  标签数量: {len(labels)}")
-        
-        # 检查是否是二分类
-        is_binary = len(labels) == 2
-        has_label_format = all(label.startswith('__label__') for label in labels)
-        
-        print(f"🎯 二分类检查:")
-        print(f"  是否二分类: {is_binary}")
-        print(f"  标签格式正确: {has_label_format}")
-        
-        if is_binary and has_label_format:
-            label0 = labels[0].replace('__label__', '')
-            label1 = labels[1].replace('__label__', '')
-            print(f"  类别0: {label0}")
-            print(f"  类别1: {label1}")
-        
-        # 获取词汇表大小
-        try:
-            words = model.get_words()
-            print(f"📚 词汇表大小: {len(words)}")
-        except:
-            print(f"⚠️ 无法获取词汇表信息")
-        
-        model_info = {
-            "labels": labels,
-            "is_binary": is_binary,
-            "has_correct_format": has_label_format,
-            "vocab_size": len(words) if 'words' in locals() else None
-        }
-        
-        return model_info
-        
+        health_response = requests.get(f"{service_url}/health", timeout=10)
+        if health_response.status_code == 200:
+            print("✅ 服务健康状态正常")
+        else:
+            print(f"⚠️ 服务健康状态异常: {health_response.status_code}")
+            return {"status": "service_unhealthy"}
     except Exception as e:
-        print(f"❌ 模型信息分析失败: {e}")
-        return {}
-
-def test_prediction_basic(model) -> Dict[str, Any]:
-    """测试基本预测功能"""
-    print("\n🧪 基本预测测试")
+        print(f"❌ 无法连接到服务: {e}")
+        return {"status": "connection_failed", "error": str(e)}
     
-    if model is None:
-        return {}
-    
-    # 测试样本（代码片段）
+    # 2. 测试基本预测功能
     test_samples = [
         "def hello_world():\n    print('Hello, World!')\n",
-        "import numpy as np\narray = np.zeros((10, 10))\nprint(array.shape)\n",
-        "function calculateSum(a, b) {\n    return a + b;\n}\nconsole.log(calculateSum(5, 3));\n",
-        "# This is a comment\n# TODO: implement feature\npass\n",
-        "SELECT * FROM users WHERE age > 18 ORDER BY name;\n"
+        "import numpy as np\narray = np.zeros((10, 10))\nprint(array.shape)\n"
+    ]
+    
+    try:
+        predict_url = f"{service_url}/predict"
+        params = {"k": 2, "threshold": 0.0}
+        
+        response = requests.post(
+            predict_url,
+            json=test_samples,
+            params=params,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            results = response.json()
+            print("✅ 模型预测功能正常")
+            
+            # 分析结果格式
+            if isinstance(results, list) and len(results) > 0:
+                first_result = results[0]
+                if isinstance(first_result, list) and len(first_result) == 2:
+                    labels, scores = first_result
+                    print(f"📋 预测标签: {labels}")
+                    print(f"📊 预测分数: {scores}")
+                    
+                    # 检查是否是二分类
+                    is_binary = len(labels) == 2
+                    print(f"🎯 二分类检查: {'✅' if is_binary else '❌'}")
+                    
+                    # 检查标签格式
+                    label_format_ok = all(isinstance(label, str) for label in labels)
+                    print(f"🏷️ 标签格式: {'✅' if label_format_ok else '❌'}")
+                    
+                    return {
+                        "status": "success",
+                        "is_binary": is_binary,
+                        "labels": labels,
+                        "sample_scores": scores,
+                        "label_format_ok": label_format_ok
+                    }
+                else:
+                    print(f"⚠️ 意外的结果格式: {first_result}")
+                    return {"status": "unexpected_format", "result": first_result}
+            else:
+                print(f"⚠️ 空结果或格式错误: {results}")
+                return {"status": "empty_result"}
+        else:
+            print(f"❌ 预测请求失败: {response.status_code}")
+            return {"status": "prediction_failed", "status_code": response.status_code}
+            
+    except Exception as e:
+        print(f"❌ 预测测试异常: {e}")
+        return {"status": "prediction_error", "error": str(e)}
+
+def test_binary_classification_behavior(service_url: str) -> Dict[str, Any]:
+    """专门测试二分类行为"""
+    print(f"\n🎯 测试二分类行为")
+    
+    # 准备不同类型的代码样本，期望得到不同的分类结果
+    test_cases = [
+        {
+            "name": "简单函数",
+            "code": "def add(a, b):\n    return a + b\n"
+        },
+        {
+            "name": "复杂类定义",
+            "code": "class ComplexProcessor:\n    def __init__(self, config):\n        self.config = config\n        self.results = []\n    \n    def process(self, data):\n        for item in data:\n            result = self.transform(item)\n            self.results.append(result)\n        return self.results\n"
+        },
+        {
+            "name": "错误代码",
+            "code": "def broken_function(\n    # 缺少参数定义\n    return undefined_variable\n"
+        },
+        {
+            "name": "注释块",
+            "code": "# This is just a comment\n# TODO: implement feature\n# FIXME: handle edge case\n"
+        },
+        {
+            "name": "SQL查询",
+            "code": "SELECT users.name, orders.amount\nFROM users\nJOIN orders ON users.id = orders.user_id\nWHERE orders.created_at > '2024-01-01';\n"
+        }
     ]
     
     results = []
     
-    for i, text in enumerate(test_samples):
-        print(f"\n--- 样本 {i+1} ---")
-        print(f"输入: {repr(text[:50])}...")
+    for test_case in test_cases:
+        print(f"\n--- 测试: {test_case['name']} ---")
         
         try:
-            # 使用predict方法（获取最可能的标签）
-            labels, probs = model.predict(text, k=2)  # 获取top-2结果
+            response = requests.post(
+                f"{service_url}/predict",
+                json=[test_case['code']],
+                params={"k": 2, "threshold": 0.0},
+                timeout=30
+            )
             
-            print(f"预测结果:")
-            for label, prob in zip(labels, probs):
-                clean_label = label.replace('__label__', '')
-                print(f"  {clean_label}: {prob:.4f}")
-            
-            results.append({
-                "input": text[:100],
-                "labels": [l.replace('__label__', '') for l in labels],
-                "probabilities": [float(p) for p in probs]
-            })
-            
+            if response.status_code == 200:
+                result = response.json()[0]  # 第一个样本的结果
+                labels, scores = result
+                
+                prediction = labels[0] if labels else "unknown"
+                confidence = scores[0] if scores else 0.0
+                
+                print(f"  预测: {prediction} (置信度: {confidence:.3f})")
+                print(f"  所有标签: {labels}")
+                print(f"  所有分数: {[f'{s:.3f}' for s in scores]}")
+                
+                results.append({
+                    "test_name": test_case['name'],
+                    "prediction": prediction,
+                    "confidence": confidence,
+                    "all_labels": labels,
+                    "all_scores": scores
+                })
+            else:
+                print(f"  ❌ 请求失败: {response.status_code}")
+                results.append({
+                    "test_name": test_case['name'],
+                    "error": f"HTTP {response.status_code}"
+                })
+                
         except Exception as e:
-            print(f"❌ 预测失败: {e}")
+            print(f"  ❌ 异常: {e}")
             results.append({
-                "input": text[:100],
+                "test_name": test_case['name'],
                 "error": str(e)
             })
     
-    return {"test_results": results}
+    return {"binary_classification_tests": results}
 
-def test_prediction_performance(model, sample_count: int = 100) -> Dict[str, Any]:
-    """测试预测性能"""
-    print(f"\n⚡ 性能测试 (样本数: {sample_count})")
-    
-    if model is None:
-        return {}
+def test_performance_via_api(service_url: str, sample_count: int = 50) -> Dict[str, Any]:
+    """通过API测试性能"""
+    print(f"\n⚡ API性能测试 (样本数: {sample_count})")
     
     # 生成测试样本
-    base_samples = [
-        "def function():\n    return True\n",
-        "import os\nprint(os.getcwd())\n",
-        "class MyClass:\n    def __init__(self):\n        pass\n",
-        "try:\n    result = process()\nexcept Exception as e:\n    print(e)\n"
-    ]
+    base_code = "def test_function():\n    return 'test'\n"
+    test_samples = [f"# Sample {i}\n{base_code}" for i in range(sample_count)]
     
-    # 扩展到指定数量
-    test_samples = []
-    for i in range(sample_count):
-        base = base_samples[i % len(base_samples)]
-        # 添加一些变化使样本不完全相同
-        sample = f"# Sample {i}\n{base}"
-        test_samples.append(sample)
+    # 测试不同批次大小的性能
+    batch_sizes = [1, 10, 25, 50] if sample_count >= 50 else [1, min(10, sample_count)]
     
-    print(f"生成 {len(test_samples)} 个测试样本")
-    
-    # 单次预测性能测试
-    print("📊 单次预测测试...")
-    single_times = []
-    
-    for i in range(min(10, sample_count)):
-        start_time = time.time()
-        try:
-            labels, probs = model.predict(test_samples[i], k=2)
-            elapsed = time.time() - start_time
-            single_times.append(elapsed)
-        except Exception as e:
-            print(f"⚠️ 单次预测失败: {e}")
-    
-    if single_times:
-        avg_single_time = sum(single_times) / len(single_times)
-        print(f"  平均单次预测时间: {avg_single_time*1000:.2f}ms")
-        print(f"  预估单次处理速度: {1/avg_single_time:.0f} samples/sec")
-    
-    # 批量预测性能测试
-    print("📊 批量预测测试...")
-    batch_sizes = [1, 10, 100] if sample_count >= 100 else [1, min(10, sample_count)]
-    
-    performance_results = {
-        "single_prediction_ms": avg_single_time * 1000 if single_times else None,
-        "batch_results": []
-    }
+    performance_results = []
     
     for batch_size in batch_sizes:
         if batch_size > len(test_samples):
@@ -194,145 +210,101 @@ def test_prediction_performance(model, sample_count: int = 100) -> Dict[str, Any
             
         batch_samples = test_samples[:batch_size]
         
-        start_time = time.time()
-        success_count = 0
-        
-        for sample in batch_samples:
-            try:
-                labels, probs = model.predict(sample, k=2)
-                success_count += 1
-            except Exception as e:
-                print(f"⚠️ 批量预测中出错: {e}")
-        
-        elapsed = time.time() - start_time
-        
-        if elapsed > 0:
-            throughput = success_count / elapsed
-            print(f"  批量大小 {batch_size}: {throughput:.0f} samples/sec")
-            
-            performance_results["batch_results"].append({
-                "batch_size": batch_size,
-                "throughput_per_sec": throughput,
-                "success_rate": success_count / batch_size
-            })
-    
-    return performance_results
-
-def test_long_text_handling(model) -> Dict[str, Any]:
-    """测试长文本处理能力"""
-    print(f"\n📏 长文本处理测试")
-    
-    if model is None:
-        return {}
-    
-    # 创建不同长度的测试文本
-    base_code = """
-def complex_function(data):
-    '''
-    This is a complex function that processes data
-    and returns meaningful results.
-    '''
-    import numpy as np
-    import pandas as pd
-    
-    # Data preprocessing
-    cleaned_data = []
-    for item in data:
-        if item is not None:
-            processed = str(item).strip().lower()
-            if len(processed) > 0:
-                cleaned_data.append(processed)
-    
-    # Statistical analysis
-    if len(cleaned_data) > 0:
-        result = {
-            'count': len(cleaned_data),
-            'unique': len(set(cleaned_data)),
-            'avg_length': sum(len(x) for x in cleaned_data) / len(cleaned_data)
-        }
-        return result
-    else:
-        return {'error': 'No valid data found'}
-
-# Usage example
-sample_data = ['hello', 'world', None, '', 'python', 'fasttext']
-result = complex_function(sample_data)
-print(result)
-"""
-    
-    length_tests = []
-    
-    # 测试不同长度
-    for multiplier in [1, 5, 10, 50, 100]:
-        long_text = base_code * multiplier
-        length = len(long_text)
-        
-        print(f"测试长度: {length:,} 字符 (x{multiplier})")
+        print(f"📊 测试批次大小: {batch_size}")
         
         try:
             start_time = time.time()
-            labels, probs = model.predict(long_text, k=2)
+            response = requests.post(
+                f"{service_url}/predict",
+                json=batch_samples,
+                params={"k": 2, "threshold": 0.0},
+                timeout=60
+            )
             elapsed = time.time() - start_time
             
-            print(f"  ✅ 成功 - 耗时: {elapsed:.3f}s")
-            print(f"  预测: {labels[0].replace('__label__', '')} ({probs[0]:.3f})")
-            
-            length_tests.append({
-                "length": length,
-                "multiplier": multiplier,
-                "success": True,
-                "time_seconds": elapsed,
-                "prediction": labels[0].replace('__label__', ''),
-                "confidence": float(probs[0])
-            })
-            
+            if response.status_code == 200:
+                results = response.json()
+                throughput = len(batch_samples) / elapsed if elapsed > 0 else 0
+                
+                print(f"  ✅ 成功处理 {len(batch_samples)} 样本")
+                print(f"  耗时: {elapsed:.3f}秒")
+                print(f"  吞吐量: {throughput:.0f} samples/sec")
+                
+                performance_results.append({
+                    "batch_size": batch_size,
+                    "samples": len(batch_samples),
+                    "time_seconds": elapsed,
+                    "throughput": throughput,
+                    "success": True
+                })
+            else:
+                print(f"  ❌ 失败: HTTP {response.status_code}")
+                performance_results.append({
+                    "batch_size": batch_size,
+                    "success": False,
+                    "status_code": response.status_code
+                })
+                
         except Exception as e:
-            print(f"  ❌ 失败: {e}")
-            length_tests.append({
-                "length": length,
-                "multiplier": multiplier,
+            print(f"  ❌ 异常: {e}")
+            performance_results.append({
+                "batch_size": batch_size,
                 "success": False,
                 "error": str(e)
             })
     
-    return {"length_tests": length_tests}
+    return {"performance_tests": performance_results}
 
 def main():
     """主函数"""
-    print("🤖 FastText模型验证")
+    print("🤖 FastText模型验证 (通过HTTP API)")
     print("=" * 50)
     
     model_path = "/mnt/project/yifan/ckpts/FT_the-stack-v2/FT_the-stack-v2.bin"
+    # 修改为实际的FastText服务地址
+    service_url = "http://localhost:8000"  # TODO: 修改为实际服务地址，如 http://服务IP:8000
     
-    # 1. 测试FastText导入
-    if not test_fasttext_import():
-        print("❌ FastText库有问题，停止测试")
+    # 1. 测试HTTP客户端
+    if not test_http_client():
+        print("❌ HTTP客户端库有问题，停止测试")
         return
     
-    # 2. 加载模型
-    model = load_model(model_path)
-    if model is None:
-        print("❌ 模型加载失败，停止测试")
+    # 2. 检查模型文件（可选，因为服务可能在不同机器上）
+    model_exists = check_model_file(model_path)
+    if not model_exists:
+        print("⚠️ 本地模型文件不存在，但服务可能在其他位置有模型")
+    
+    # 3. 测试服务中的模型
+    service_test = test_service_with_model(service_url)
+    if service_test.get("status") not in ["success"]:
+        print("❌ 服务模型测试失败，检查服务是否运行")
+        print("💡 提示：如果服务在其他地址，请修改 service_url 变量")
+        
+        # 保存基础结果
+        basic_results = {
+            "model_file_exists": model_exists,
+            "service_test": service_test
+        }
+        
+        output_file = "model_validation_result.json"
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(basic_results, f, indent=2, ensure_ascii=False)
+        
+        print(f"📄 基础结果已保存到: {output_file}")
         return
     
-    # 3. 分析模型信息
-    model_info = analyze_model_info(model)
-    
-    # 4. 基本预测测试
-    basic_results = test_prediction_basic(model)
+    # 4. 二分类行为测试
+    binary_test = test_binary_classification_behavior(service_url)
     
     # 5. 性能测试
-    performance_results = test_prediction_performance(model, sample_count=50)
-    
-    # 6. 长文本测试
-    long_text_results = test_long_text_handling(model)
+    performance_test = test_performance_via_api(service_url, sample_count=30)
     
     # 汇总结果
     validation_results = {
-        "model_info": model_info,
-        "basic_prediction": basic_results,
-        "performance": performance_results,
-        "long_text_handling": long_text_results
+        "model_file_exists": model_exists,
+        "service_test": service_test,
+        "binary_classification": binary_test,
+        "performance": performance_test
     }
     
     # 保存结果
@@ -344,7 +316,8 @@ def main():
     print(f"📄 详细结果已保存到: {output_file}")
     print(f"\n📋 下一步:")
     print(f"  1. 检查验证结果文件")
-    print(f"  2. 执行服务测试: python3 tests/04_service_test.py")
+    print(f"  2. 如果服务在其他地址，修改脚本中的service_url")
+    print(f"  3. 执行服务测试: python3 tests/04_service_test.py")
 
 if __name__ == "__main__":
     main()

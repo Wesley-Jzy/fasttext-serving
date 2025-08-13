@@ -284,9 +284,8 @@ async def main():
     print("🌐 FastText Serving 服务测试")
     print("=" * 50)
     
-    # 这里需要用户提供实际的服务URL
-    # base_url = "http://localhost:8000"  # 默认本地
-    base_url = "http://fasttext-serving-4nodes.serving.va-mlp.anuttacon.com"  # 用户提供的URL
+    # 修改为实际的FastText服务地址
+    base_url = "http://localhost:8000"  # TODO: 修改为实际服务地址
     
     print(f"🎯 测试目标: {base_url}")
     

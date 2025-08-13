@@ -31,12 +31,8 @@ def check_required_packages():
         except ImportError:
             print(f"  ❌ {package}: 未安装")
     
-    # 特别检查fasttext
-    try:
-        import fasttext
-        print(f"  ✅ fasttext: 已安装 (版本: {fasttext.__version__ if hasattr(fasttext, '__version__') else '未知'})")
-    except ImportError:
-        print(f"  ❌ fasttext: 未安装")
+    # 注意：我们不需要直接的fasttext库，因为我们通过HTTP API调用FastText服务
+    print(f"  ℹ️ fasttext: 通过HTTP API调用，无需直接安装")
     print()
 
 def check_data_paths():
