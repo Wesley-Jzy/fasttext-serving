@@ -92,7 +92,7 @@ class TheStackV2Processor:
             
             progress = {
                 "completed_files": completed_files,
-                "start_time": self.start_time.isoformat() if self.start_time else None,
+                "start_time": pd.Timestamp.fromtimestamp(self.start_time).isoformat() if self.start_time else None,
                 "last_update": pd.Timestamp.now().isoformat(),
                 "total_processed": self.processed_count,
                 "total_errors": self.error_count,
@@ -107,10 +107,31 @@ class TheStackV2Processor:
     
     def filter_remaining_files(self, all_files: List[Path], test_mode: bool = False) -> List[Path]:
         """过滤出剩余未处理的文件"""
-        # 测试模式：只处理前2个最小文件
+        # 测试模式：选择已知的好文件进行测试
         if test_mode:
-            test_files = all_files[:2]
-            print(f"🧪 测试模式：选择前{len(test_files)}个最小文件")
+            # 寻找之前测试过的好文件
+            known_good_files = [
+                "the-stack-v2-dedup-train-00516-of-01078.parquet",
+                "the-stack-v2-dedup-train-00341-of-01078.parquet", 
+                "the-stack-v2-dedup-train-00195-of-01078.parquet"
+            ]
+            
+            test_files = []
+            for file_path in all_files:
+                if file_path.name in known_good_files:
+                    test_files.append(file_path)
+                    if len(test_files) >= 2:  # 只要2个文件测试
+                        break
+            
+            if not test_files:
+                # 如果找不到已知好文件，选择中等大小的文件（避免最小的损坏文件）
+                mid_point = len(all_files) // 2
+                test_files = all_files[mid_point:mid_point+2]
+                print(f"🧪 测试模式：未找到已知好文件，选择中等大小的文件")
+            else:
+                print(f"🧪 测试模式：选择已知的好文件进行测试")
+            
+            print(f"📋 测试文件: {[f.name for f in test_files]}")
             return test_files
         
         if not self.config.resume_from_checkpoint:
