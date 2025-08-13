@@ -47,7 +47,7 @@ impl server::FasttextServing for FastTextServingService {
             
             match predict_one_safe(&model, &text, k, threshold) {
                 Ok((labels, probs)) => {
-                    predictions.push(Prediction { labels, probs });
+            predictions.push(Prediction { labels, probs });
                     processed_count += 1;
                 }
                 Err(e) => {
@@ -88,7 +88,7 @@ impl server::FasttextServing for FastTextServingService {
             
             match model.get_sentence_vector(&text) {
                 Ok(values) => {
-                    vectors.push(SentenceVector { values });
+            vectors.push(SentenceVector { values });
                     processed_count += 1;
                 }
                 Err(e) => {
