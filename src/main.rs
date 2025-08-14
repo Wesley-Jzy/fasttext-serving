@@ -61,19 +61,10 @@ pub fn predict_one_safe(
     // Ensure k >= 1
     let k = if k > 0 { k } else { 1 };
     
-    // NOTE: text needs to end in a newline
-    // to exactly mimic the behavior of the cli
-    let preds = if text.ends_with('\n') {
-        model
-            .predict(text, k as i32, threshold)
-            .map_err(|e| PredictError::ModelError(format!("Prediction failed: {}", e)))?
-    } else {
-        let mut text = text.to_string();
-        text.push('\n');
-        model
-            .predict(&text, k as i32, threshold)
-            .map_err(|e| PredictError::ModelError(format!("Prediction failed: {}", e)))?
-    };
+    // 直接使用原始文本，不做预处理，让算法自己处理
+    let preds = model
+        .predict(text, k as i32, threshold)
+        .map_err(|e| PredictError::ModelError(format!("Prediction failed: {}", e)))?;
     
     let mut labels = Vec::with_capacity(preds.len());
     let mut probs = Vec::with_capacity(preds.len());
