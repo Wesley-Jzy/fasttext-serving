@@ -113,8 +113,12 @@ class FastTextValidator:
         
         # 限制样本数量用于测试
         if max_samples:
-            df = df.head(max_samples)
-            print(f"🔬 测试模式: 只处理前 {len(df)} 个样本")
+            if hasattr(self, 'random_sampling') and self.random_sampling:
+                df = df.sample(n=max_samples, random_state=42)
+                print(f"🔬 测试模式: 随机抽样 {len(df)} 个样本")
+            else:
+                df = df.head(max_samples)
+                print(f"🔬 测试模式: 只处理前 {len(df)} 个样本")
         
         # 获取内容和真实标签
         contents = df['content'].tolist()

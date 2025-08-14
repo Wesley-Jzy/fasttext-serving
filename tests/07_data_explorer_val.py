@@ -62,11 +62,21 @@ def explore_validation_data():
             for p in [25, 50, 75, 90, 95, 99]:
                 print(f"    {p}%: {content_lengths.quantile(p/100):,.0f} 字符")
         
+        # 检查是否有预测分数列
+        score_cols = [col for col in df.columns if 'score' in col.lower() or 'prob' in col.lower() or 'conf' in col.lower()]
+        if score_cols:
+            print(f"\n📊 发现分数相关列: {score_cols}")
+            for col in score_cols:
+                print(f"  {col}: {df[col].dtype}, 样本值: {df[col].head(3).tolist()}")
+        
         # 样本预览
         print(f"\n👀 数据样本预览:")
         display_cols = ['label', 'FT_label']
         if 'content' in df.columns:
             display_cols.append('content')
+        # 添加分数列到预览
+        if score_cols:
+            display_cols.extend(score_cols[:2])  # 只显示前2个分数列
         
         for col in display_cols:
             if col in df.columns:
