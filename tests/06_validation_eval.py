@@ -42,7 +42,12 @@ class FastTextValidator:
                 timeout=aiohttp.ClientTimeout(total=30)
             ) as response:
                 if response.status == 200:
-                    return await response.json()
+                    result = await response.json()
+                    # 调试：打印第一个批次的返回格式
+                    if hasattr(self, '_first_batch_logged') is False:
+                        print(f"🔍 服务返回格式示例: {result[:2]}")
+                        self._first_batch_logged = True
+                    return result
                 else:
                     print(f"❌ 请求失败: {response.status}")
                     return [{"labels": ["__label__0"], "scores": [0.5]} for _ in batch_texts]
@@ -50,10 +55,19 @@ class FastTextValidator:
             print(f"❌ 预测异常: {e}")
             return [{"labels": ["__label__0"], "scores": [0.5]} for _ in batch_texts]
     
-    def convert_prediction(self, pred_result: Dict[str, Any]) -> str:
+    def convert_prediction(self, pred_result) -> str:
         """将预测结果转换为标签"""
-        labels = pred_result.get("labels", ["__label__0"])
-        scores = pred_result.get("scores", [0.5])
+        # 处理不同的返回格式
+        if isinstance(pred_result, dict):
+            labels = pred_result.get("labels", ["__label__0"])
+            scores = pred_result.get("scores", [0.5])
+        elif isinstance(pred_result, list) and len(pred_result) >= 2:
+            # 如果是列表格式 [labels, scores]
+            labels = pred_result[0] if len(pred_result) > 0 else ["__label__0"]
+            scores = pred_result[1] if len(pred_result) > 1 else [0.5]
+        else:
+            print(f"⚠️ 未知预测格式: {pred_result}")
+            return "__label__0"
         
         if not labels or not scores:
             return "__label__0"
