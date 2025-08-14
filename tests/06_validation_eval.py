@@ -74,7 +74,14 @@ class FastTextValidator:
         
         # 取得分最高的标签
         max_idx = np.argmax(scores)
-        return labels[max_idx]
+        raw_label = labels[max_idx]
+        
+        # 转换为FastText格式
+        if raw_label.startswith('__label__'):
+            return raw_label
+        else:
+            # 如果是 '0', '1' 格式，转换为 '__label__0', '__label__1'
+            return f"__label__{raw_label}"
     
     async def evaluate_validation_set(self, val_file: str, max_samples: int = None):
         """评估验证集"""
