@@ -6,7 +6,7 @@ use futures::StreamExt;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::predict_one_safe;
+
 
 #[allow(non_camel_case_types)]
 mod proto {

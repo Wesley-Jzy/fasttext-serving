@@ -7,7 +7,7 @@ use actix_web::{web, App, HttpServer, HttpResponse, Result as ActixResult};
 use fasttext::FastText;
 use serde::{Deserialize, Serialize};
 
-use crate::predict_one_safe;
+
 
 const UNIX_PREFIX: &'static str = "unix:";
 

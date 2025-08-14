@@ -33,7 +33,7 @@ impl std::fmt::Display for PredictError {
 
 impl std::error::Error for PredictError {}
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub max_text_length: usize,
     pub default_threshold: f32,
@@ -265,7 +265,7 @@ fn main() {
 
     if matches.get_flag("grpc") {
         #[cfg(feature = "grpc")]
-        crate::grpc::runserver(model, address, port.parse().unwrap(), workers, config);
+        crate::grpc::runserver(model, address, port, workers, config);
         #[cfg(not(feature = "grpc"))]
         {
             log::error!("gRPC support is not enabled!");
@@ -273,7 +273,7 @@ fn main() {
         }
     } else {
         #[cfg(feature = "http")]
-        crate::http::runserver(model, address, port.parse().unwrap(), workers, config);
+        crate::http::runserver(model, address, port, workers, config);
         #[cfg(not(feature = "http"))]
         {
             log::error!("HTTP support is not enabled!");
