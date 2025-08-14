@@ -1,4 +1,9 @@
-# FastText Serving v0.2 - 全参数可配置版本
+# FastText Serving - Rust Implementation
+# 多阶段构建：编译 + 运行时
+
+# ================================
+# 构建阶段
+# ================================
 FROM rust:1.70 as builder
 
 WORKDIR /app
@@ -8,16 +13,18 @@ RUN apt-get update && \
     apt-get install -y protobuf-compiler && \
     rm -rf /var/lib/apt/lists/*
 
-# 复制源代码
-COPY Cargo.toml Cargo.lock ./
-COPY build.rs ./
-COPY src/ ./src/
-COPY proto/ ./proto/
+# 复制Rust源码
+COPY implementations/rust/Cargo.toml implementations/rust/Cargo.lock ./
+COPY implementations/rust/build.rs ./
+COPY implementations/rust/src/ ./src/
+COPY implementations/rust/proto/ ./proto/
 
-# 编译Release版本
+# 编译Release版本（带标签修复）
 RUN cargo build --release --features http
 
-# 运行时镜像
+# ================================
+# 运行时阶段
+# ================================
 FROM ubuntu:20.04
 
 # 安装运行时依赖
@@ -27,7 +34,7 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# 从builder复制编译好的二进制文件
+# 从builder复制二进制文件
 COPY --from=builder /app/target/release/fasttext-serving /usr/local/bin/fasttext-serving
 
 # 创建模型目录
@@ -43,10 +50,10 @@ ENV RUST_LOG=fasttext_serving=info
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# 入口点
+# 入口点 - 完整参数化支持
 ENTRYPOINT ["/usr/local/bin/fasttext-serving"]
 
-# 默认命令参数（所有参数都可以在启动时覆盖）
+# 默认参数（所有参数可在启动时覆盖）
 CMD ["--model", "/app/models/model.bin", \
      "--address", "0.0.0.0", \
      "--port", "8000", \
@@ -55,3 +62,9 @@ CMD ["--model", "/app/models/model.bin", \
      "--max-text-length", "10000000", \
      "--default-threshold", "0.0", \
      "--default-vector-dim", "100"]
+
+# 元数据
+LABEL maintainer="fasttext-serving" \
+      version="1.0.0" \
+      implementation="rust" \
+      description="FastText Serving - High-performance Rust implementation with fixed label processing"

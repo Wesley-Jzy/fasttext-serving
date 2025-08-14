@@ -1,5 +1,5 @@
 use clap::{Arg, ArgAction, Command};
-// use fasttext::FastText;  // 注释掉Rust FastText
+use fasttext::FastText;
 use std::env;
 use std::path::Path;
 
@@ -43,7 +43,7 @@ pub struct ServerConfig {
 
 #[inline]
 pub fn predict_one_safe(
-    model_path: &str,
+    model: &FastText,
     text: &str,
     k: u32,
     threshold: f32,
@@ -61,115 +61,38 @@ pub fn predict_one_safe(
     // Ensure k >= 1
     let k = if k > 0 { k } else { 1 };
     
-    // 调用官方Python FastText v0.9.2
-    call_python_fasttext(model_path, text, k, threshold)
+    // 直接使用原始文本，不做预处理
+    let preds = model
+        .predict(text, k as i32, threshold)
+        .map_err(|e| PredictError::ModelError(format!("Prediction failed: {}", e)))?;
+    
+    let mut labels = Vec::with_capacity(preds.len());
+    let mut probs = Vec::with_capacity(preds.len());
+    for pred in &preds {
+        // ✅ 修复：保持完整的__label__格式，不移除前缀
+        labels.push(pred.label.clone());  // 保持原始标签：__label__0, __label__1
+        probs.push(pred.prob);
+    }
+    
+    Ok((labels, probs))
 }
 
-fn call_python_fasttext(
-    model_path: &str,
-    text: &str,
-    k: u32,
-    threshold: f32,
-) -> Result<(Vec<String>, Vec<f32>), PredictError> {
-    use std::process::Command;
-    use std::io::Write;
-    
-    // 创建Python脚本调用FastText
-    let python_script = format!(
-        r#"
-import fasttext
-import json
-import sys
 
-try:
-    # 加载模型
-    model = fasttext.load_model('{}')
-    
-    # 读取输入文本
-    text = sys.stdin.read().strip()
-    
-    # 预测
-    labels, probs = model.predict(text, k={})
-    
-    # 转换为列表并输出JSON
-    result = {{
-        "labels": [label.replace("__label__", "") for label in labels],
-        "scores": probs.tolist()
-    }}
-    print(json.dumps(result))
-    
-except Exception as e:
-    print(json.dumps({{"error": str(e)}}), file=sys.stderr)
-    sys.exit(1)
-"#,
-        model_path, k
-    );
-    
-    // 执行Python脚本
-    let mut child = Command::new("python3")
-        .arg("-c")
-        .arg(&python_script)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| PredictError::ModelError(format!("Failed to start Python: {}", e)))?;
-    
-    // 写入文本到stdin
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin.write_all(text.as_bytes())
-            .map_err(|e| PredictError::ModelError(format!("Failed to write to Python stdin: {}", e)))?;
-    }
-    
-    // 等待执行完成
-    let output = child.wait_with_output()
-        .map_err(|e| PredictError::ModelError(format!("Failed to execute Python: {}", e)))?;
-    
-    if !output.status.success() {
-        let error_msg = String::from_utf8_lossy(&output.stderr);
-        return Err(PredictError::ModelError(format!("Python FastText error: {}", error_msg)));
-    }
-    
-    // 解析JSON结果
-    let result_str = String::from_utf8_lossy(&output.stdout);
-    let result: serde_json::Value = serde_json::from_str(&result_str)
-        .map_err(|e| PredictError::ModelError(format!("Failed to parse Python output: {}", e)))?;
-    
-    if let Some(error) = result.get("error") {
-        return Err(PredictError::ModelError(format!("FastText error: {}", error)));
-    }
-    
-    let labels: Vec<String> = result["labels"]
-        .as_array()
-        .ok_or_else(|| PredictError::ModelError("Invalid labels format".to_string()))?
-        .iter()
-        .map(|v| v.as_str().unwrap_or("").to_string())
-        .collect();
-    
-    let scores: Vec<f32> = result["scores"]
-        .as_array()
-        .ok_or_else(|| PredictError::ModelError("Invalid scores format".to_string()))?
-        .iter()
-        .map(|v| v.as_f64().unwrap_or(0.0) as f32)
-        .collect();
-    
-    Ok((labels, scores))
-}
 
 // 保留原始的predict_one函数以保持向后兼容，但内部使用安全版本
 #[inline]
 pub fn predict_one(
-    model_path: &str,
+    model: &FastText,
     text: &str,
     k: u32,
     threshold: f32,
     max_text_length: usize,
 ) -> (Vec<String>, Vec<f32>) {
-    match predict_one_safe(model_path, text, k, threshold, max_text_length) {
+    match predict_one_safe(model, text, k, threshold, max_text_length) {
         Ok(result) => result,
         Err(e) => {
             log::error!("Prediction failed, returning default result: {}", e);
-            (vec!["error".to_string()], vec![0.0])
+            (vec!["__label__error".to_string()], vec![0.0])  // 使用完整标签格式
         }
     }
 }
@@ -282,13 +205,17 @@ fn main() {
         .get_one::<String>("default-vector-dim")
         .expect("missing default-vector-dim");
         
-    log::info!("Using FastText model from: {}", model_path);
-    // 验证模型文件存在（实际加载在Python中进行）
-    if !Path::new(model_path).exists() {
-        log::error!("Model file does not exist: {}", model_path);
-        std::process::exit(1);
+    log::info!("Loading FastText model from: {}", model_path);
+    let mut model = FastText::new();
+    match model.load_model(model_path) {
+        Ok(_) => {
+            log::info!("FastText model loaded successfully");
+        }
+        Err(e) => {
+            log::error!("Failed to load FastText model: {}", e);
+            std::process::exit(1);
+        }
     }
-    log::info!("Model path verified, will use Python FastText v0.9.2");
     
     let port: u16 = port.parse().unwrap_or_else(|_| {
         log::error!("Invalid port number: {}", port);
@@ -332,7 +259,7 @@ fn main() {
 
     if matches.get_flag("grpc") {
         #[cfg(feature = "grpc")]
-        crate::grpc::runserver(model_path.to_string(), address, port, workers, config);
+        crate::grpc::runserver(model, address, port, workers, config);
         #[cfg(not(feature = "grpc"))]
         {
             log::error!("gRPC support is not enabled!");
@@ -340,7 +267,7 @@ fn main() {
         }
     } else {
         #[cfg(feature = "http")]
-        crate::http::runserver(model_path.to_string(), address, port, workers, config);
+        crate::http::runserver(model, address, port, workers, config);
         #[cfg(not(feature = "http"))]
         {
             log::error!("HTTP support is not enabled!");

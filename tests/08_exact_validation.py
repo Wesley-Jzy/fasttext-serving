@@ -94,7 +94,7 @@ class LabelValidator:
             print(f"🔬 测试模式: 只验证前 {len(df)} 个样本")
         
         # 获取内容和真实标签
-        contents = df['content'].tolist()
+        contents = df['clean_content'].tolist()
         true_labels = df['FT_label'].tolist()
         
         print(f"\n🚀 开始批量预测 {len(contents)} 个样本...")

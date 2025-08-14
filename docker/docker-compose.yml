@@ -1,0 +1,82 @@
+version: '3.8'
+
+# FastText Serving - 多实现支持
+# 可以选择启动Rust或Python版本
+
+services:
+  # Python实现 - 推荐用于生产（准确性优先）
+  fasttext-python:
+    build:
+      context: ..
+      dockerfile: docker/python.Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ${MODEL_PATH:-./models}:/app/models:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: [
+      "--model", "/app/models/${MODEL_FILE:-model.bin}",
+      "--address", "0.0.0.0",
+      "--port", "8000",
+      "--max-text-length", "${MAX_TEXT_LENGTH:-10000000}",
+      "--default-threshold", "${DEFAULT_THRESHOLD:-0.0}"
+    ]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # Rust实现 - 可选用于高性能场景
+  fasttext-rust:
+    build:
+      context: ..
+      dockerfile: docker/rust.Dockerfile
+    ports:
+      - "8001:8000"  # 使用不同端口避免冲突
+    volumes:
+      - ${MODEL_PATH:-./models}:/app/models:ro
+    environment:
+      - RUST_LOG=fasttext_serving=info
+    command: [
+      "--model", "/app/models/${MODEL_FILE:-model.bin}",
+      "--address", "0.0.0.0",
+      "--port", "8000",
+      "--workers", "${WORKERS:-4}",
+      "--max-text-length", "${MAX_TEXT_LENGTH:-10000000}",
+      "--max-request-size", "${MAX_REQUEST_SIZE:-500}",
+      "--default-threshold", "${DEFAULT_THRESHOLD:-0.0}"
+    ]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # 可选：负载均衡器（用于生产环境）
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - fasttext-python
+    restart: unless-stopped
+    profiles:
+      - production
+
+# 网络配置
+networks:
+  default:
+    name: fasttext-serving
+
+# 卷配置
+volumes:
+  models:
+    driver: local

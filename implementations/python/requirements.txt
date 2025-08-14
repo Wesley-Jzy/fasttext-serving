@@ -1,0 +1,20 @@
+# FastText Serving Python Implementation Requirements
+
+# Core dependencies
+fasttext==0.9.2             # 官方FastText库，确保与算法一致
+flask==2.3.3                # HTTP服务框架
+flask-cors==4.0.0           # CORS支持
+
+# JSON和数据处理
+numpy>=1.21.0               # 数值计算
+
+# 日志和监控
+structlog>=23.1.0           # 结构化日志
+
+# 开发和测试
+pytest>=7.0.0              # 测试框架
+requests>=2.28.0           # HTTP客户端（测试用）
+
+# 可选：性能优化
+gunicorn>=21.0.0           # WSGI服务器（生产环境）
+gevent>=22.0.0             # 协程支持（提升并发）

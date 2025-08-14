@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use actix_web::rt::System;
 use actix_web::{web, App, HttpServer, HttpResponse, Result as ActixResult};
-// use fasttext::FastText;  // 不再使用Rust FastText
+use fasttext::FastText;
 use serde::{Deserialize, Serialize};
 
 
@@ -115,9 +115,9 @@ async fn predict(
             }
             Err(e) => {
                 log::warn!("Prediction failed for text (length: {}): {}", txt.len(), e);
-                // 返回默认结果而不是失败
+                // 返回默认结果而不是失败，使用完整标签格式
                 results.push(PredictResult {
-                    labels: vec!["error".to_string()],
+                    labels: vec!["__label__error".to_string()],
                     scores: vec![0.0],
                 });
                 error_count += 1;
