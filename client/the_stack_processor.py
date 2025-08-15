@@ -609,8 +609,9 @@ class TheStackProcessor:
                         if not batch_texts:
                             continue
                         
-                        # 异步推理
-                        predictions = await self.predict_batch(batch_texts, semaphore)
+                        # 异步推理（信号量控制在外层）
+                        async with semaphore:
+                            predictions = await self.predict_batch(batch_texts)
                         
                         # 后处理
                         batch_results = self.postprocess_results(batch_data, predictions)
