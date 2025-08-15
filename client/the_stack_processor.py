@@ -58,9 +58,9 @@ class ProcessingStats:
     current_file: str = ""
     processing_time: float = 0
     
-    # 数据量统计（基于content字节数）
-    total_content_bytes: int = 0  # 总内容字节数
-    processed_content_bytes: int = 0  # 已处理内容字节数
+    # 数据量统计
+    total_file_bytes: int = 0  # 总文件大小（字节）
+    processed_content_bytes: int = 0  # 已处理的实际content字节数
     
     # 性能指标
     throughput_sps: float = 0  # samples per second
@@ -177,12 +177,9 @@ class TheStackProcessor:
                 
             ready_files.append(file_path)
             
-            # 计算文件内容字节数（采样方式，避免完整加载大文件）
-            try:
-                file_content_bytes = self.estimate_file_content_bytes(file_path)
-                total_content_bytes += file_content_bytes
-            except Exception as e:
-                self.logger.warning(f"⚠️ 无法估算文件大小: {file_path.name} - {e}")
+            # 直接使用文件大小，简单快速
+            file_size_bytes = self.get_file_size_bytes(file_path)
+            total_content_bytes += file_size_bytes
         
         # 性能测试模式下限制文件数
         if self.config.performance_test:
@@ -190,61 +187,21 @@ class TheStackProcessor:
             # 重新计算限制后的总数据量
             total_content_bytes = 0
             for file_path in ready_files:
-                try:
-                    file_content_bytes = self.estimate_file_content_bytes(file_path)
-                    total_content_bytes += file_content_bytes
-                except:
-                    pass
+                file_size_bytes = self.get_file_size_bytes(file_path)
+                total_content_bytes += file_size_bytes
         
         self.stats.total_files = len(ready_files)
-        self.stats.total_content_bytes = total_content_bytes
+        self.stats.total_file_bytes = total_content_bytes
         self._initial_scan_completed = True
         
-        self.logger.info(f"📊 扫描完成: {len(ready_files)} 个就绪文件, 总计 {total_content_bytes / (1024**3):.2f} GB 内容")
+        self.logger.info(f"📊 扫描完成: {len(ready_files)} 个就绪文件, 总计 {total_content_bytes / (1024**3):.2f} GB")
     
-    def estimate_file_content_bytes(self, file_path: Path) -> int:
-        """估算文件中content列的总字节数"""
+    def get_file_size_bytes(self, file_path: Path) -> int:
+        """获取文件大小（字节）"""
         try:
-            import pandas as pd
-            
-            # 采样方式：读取前N行来估算
-            sample_size = 100 if not self.config.performance_test else 50
-            df_sample = pd.read_parquet(file_path, engine='pyarrow')
-            
-            if len(df_sample) == 0:
-                return 0
-                
-            # 限制采样行数
-            if len(df_sample) > sample_size:
-                df_sample = df_sample.head(sample_size)
-                
-            # 计算采样的content字节数
-            if 'content' not in df_sample.columns:
-                return 0
-                
-            sample_content_bytes = sum(len(str(content).encode('utf-8')) 
-                                     for content in df_sample['content'] 
-                                     if pd.notna(content))
-            
-            # 如果采样数小于总行数，按比例估算
-            if len(df_sample) == sample_size:
-                # 重新读取总行数（只读元数据，不加载数据）
-                total_rows = len(pd.read_parquet(file_path, columns=[]))
-                estimated_bytes = (sample_content_bytes / sample_size) * total_rows
-            else:
-                estimated_bytes = sample_content_bytes
-                
-            # 性能测试模式下限制每文件的样本数
-            if self.config.performance_test:
-                max_samples = self.config.test_samples_per_file
-                if len(df_sample) > 0:
-                    estimated_bytes = min(estimated_bytes, 
-                                        (sample_content_bytes / len(df_sample)) * max_samples)
-            
-            return int(estimated_bytes)
-            
+            return file_path.stat().st_size
         except Exception as e:
-            self.logger.warning(f"⚠️ 估算文件内容大小失败 {file_path.name}: {e}")
+            self.logger.warning(f"⚠️ 获取文件大小失败 {file_path.name}: {e}")
             return 0
     
     async def generate_performance_report(self):
@@ -586,22 +543,26 @@ class TheStackProcessor:
             self.logger.info(f"📄 开始处理: {file_path.name}")
             
             try:
-                # 加载数据
-                df = pd.read_parquet(file_path)
+                # 使用流式分批读取，避免大文件内存爆炸
+                import pyarrow.parquet as pq
                 
-                if len(df) == 0:
+                parquet_file = pq.ParquetFile(file_path)
+                total_rows = parquet_file.metadata.num_rows
+                
+                if total_rows == 0:
                     self.logger.warning(f"⚠️ 空文件: {file_path.name}")
                     self.processed_files.add(str(file_path))
                     return True
                 
                 # 检查必需列
-                if 'content' not in df.columns:
+                schema = parquet_file.schema_arrow
+                if 'content' not in schema.names:
                     self.logger.error(f"❌ 缺少content列: {file_path.name}")
                     return False
                 
-                # 预处理数据
-                valid_data = []
-                valid_texts = []
+                # 计算动态缓存大小：基于当前并发配置
+                # cache_size = 并发数 * 批次大小 * 缓冲倍数
+                cache_size = self.config.max_concurrent * self.config.batch_size * 3
                 
                 # 性能测试模式下限制样本数
                 max_samples = None
@@ -609,66 +570,70 @@ class TheStackProcessor:
                     max_samples = self.config.test_samples_per_file
                     self.logger.info(f"🧪 性能测试模式: 限制样本数 {max_samples}")
                 
-                sample_count = 0
-                file_content_bytes = 0  # 此文件的内容字节数
+                self.logger.info(f"📊 {file_path.name}: 总行数 {total_rows:,}, 缓存大小 {cache_size:,}")
                 
-                for idx, row in df.iterrows():
-                    if max_samples and sample_count >= max_samples:
-                        break
+                # 流式处理：分批读取和处理
+                all_results = []
+                file_content_bytes = 0
+                processed_count = 0
+                
+                for batch in parquet_file.iter_batches(batch_size=cache_size):
+                    # 转换为pandas DataFrame进行处理
+                    df_chunk = batch.to_pandas()
+                    
+                    # 预处理这个chunk的数据
+                    chunk_data = []
+                    chunk_texts = []
+                    
+                    for idx, row in df_chunk.iterrows():
+                        # 检查是否达到样本限制
+                        if max_samples and processed_count >= max_samples:
+                            break
+                            
+                        content = self.preprocess_content(row.get('content', ''))
+                        if content:
+                            chunk_data.append(row.to_dict())
+                            chunk_texts.append(content)
+                            file_content_bytes += len(content.encode('utf-8'))
+                            processed_count += 1
+                    
+                    if not chunk_texts:
+                        continue
+                    
+                    # 分批处理这个chunk的数据
+                    chunk_results = []
+                    for i in range(0, len(chunk_texts), self.config.batch_size):
+                        batch_texts = chunk_texts[i:i + self.config.batch_size]
+                        batch_data = chunk_data[i:i + self.config.batch_size]
                         
-                    content = self.preprocess_content(row.get('content', ''))
-                    if content:
-                        valid_data.append(row.to_dict())
-                        valid_texts.append(content)
-                        # 计算内容字节数
-                        file_content_bytes += len(content.encode('utf-8'))
-                        sample_count += 1
+                        if not batch_texts:
+                            continue
+                        
+                        # 异步推理
+                        predictions = await self.predict_batch(batch_texts, semaphore)
+                        
+                        # 后处理
+                        batch_results = self.postprocess_results(batch_data, predictions)
+                        chunk_results.extend(batch_results)
+                        
+                        # 更新统计
+                        valid_count = sum(1 for r in batch_results if r.get('prediction_valid', False))
+                        self.stats.successful_samples += valid_count
+                        self.stats.failed_samples += len(batch_results) - valid_count
+                    
+                    all_results.extend(chunk_results)
+                    
+                    # 检查是否达到样本限制
+                    if max_samples and processed_count >= max_samples:
+                        break
                 
-                if not valid_texts:
+                if not all_results:
                     self.logger.warning(f"⚠️ 无有效内容: {file_path.name}")
                     self.processed_files.add(str(file_path))
                     return True
                 
-                self.logger.info(f"📊 {file_path.name}: 处理 {len(valid_texts)} 个样本, {file_content_bytes / (1024**2):.1f} MB 内容")
-                self.stats.total_samples += len(valid_texts)
-                
-                # 分批处理
-                all_results = []
-                batch_count = 0
-                
-                for i in range(0, len(valid_texts), self.config.batch_size):
-                    # 检查是否需要关闭
-                    if self.shutdown_event.is_set():
-                        self.logger.info("🛑 收到关闭信号，停止处理")
-                        return False
-                    
-                    batch_texts = valid_texts[i:i + self.config.batch_size]
-                    batch_data = valid_data[i:i + self.config.batch_size]
-                    
-                    batch_count += 1
-                    self.logger.debug(f"  批次 {batch_count}: {len(batch_texts)} 样本")
-                    
-                    # API预测
-                    predictions = await self.predict_batch(batch_texts)
-                    
-                    # 后处理
-                    batch_results = self.postprocess_results(batch_data, predictions)
-                    all_results.extend(batch_results)
-                    
-                    # 更新统计
-                    self.stats.processed_samples += len(batch_texts)
-                    
-                    # 统计有效预测和无效预测
-                    valid_count = 0
-                    for result in batch_results:
-                        if result.get("prediction_valid", True):
-                            valid_count += 1
-                        else:
-                            # 记录无效预测
-                            self.logger.warning(f"无效预测: {result.get('prediction_error', 'unknown_error')}")
-                    
-                    self.stats.successful_samples += valid_count
-                    self.stats.failed_samples += len(batch_texts) - valid_count
+                self.logger.info(f"📊 {file_path.name}: 流式处理完成 {processed_count} 个样本, {file_content_bytes / (1024**2):.1f} MB 内容")
+                self.stats.total_samples += processed_count
                 
                 # 保存结果
                 success = await self.save_file_results(file_path, all_results)
@@ -679,21 +644,15 @@ class TheStackProcessor:
                     self.stats.processed_files += 1
                     self.stats.processed_content_bytes += file_content_bytes
                     
-                    # 计算成功和失败的样本数
-                    successful_count = sum(1 for result in all_results if result.get('prediction_valid', False))
-                    failed_count = len(all_results) - successful_count
-                    self.stats.successful_samples += successful_count
-                    self.stats.failed_samples += failed_count
-                    
                     processing_time = time.time() - start_time
                     self.stats.processing_time += processing_time
                     
-                    throughput = len(valid_texts) / processing_time
+                    throughput = processed_count / processing_time
                     # 计算GB/s处理速度
                     content_gb = file_content_bytes / (1024**3)
                     throughput_gbps = content_gb / processing_time
                     self.logger.info(f"✅ 完成: {file_path.name} "
-                                   f"({len(valid_texts)} 样本, {throughput:.1f} samples/sec, "
+                                   f"({processed_count} 样本, {throughput:.1f} samples/sec, "
                                    f"{throughput_gbps:.3f} GB/s)")
                     
                     # 定期保存检查点
@@ -741,18 +700,18 @@ class TheStackProcessor:
             file_progress_str = f"{self.stats.processed_files}"
         
         # 数据量进度
-        processed_gb = self.stats.processed_content_bytes / (1024**3)
-        if self.stats.total_content_bytes > 0:
-            total_gb = self.stats.total_content_bytes / (1024**3)
-            data_progress_pct = (self.stats.processed_content_bytes / self.stats.total_content_bytes) * 100
-            data_progress_str = f"{processed_gb:.2f}/{total_gb:.2f}GB ({data_progress_pct:.1f}%)"
+        processed_content_gb = self.stats.processed_content_bytes / (1024**3)
+        if self.stats.total_file_bytes > 0:
+            total_file_gb = self.stats.total_file_bytes / (1024**3)
+            # 这里不做百分比，因为content字节数和文件大小不能直接比较
+            data_progress_str = f"{processed_content_gb:.2f}GB内容 / {total_file_gb:.2f}GB文件"
         else:
-            data_progress_str = f"{processed_gb:.2f}GB"
+            data_progress_str = f"{processed_content_gb:.2f}GB内容"
         
         # 性能指标
         if elapsed_time > 0:
             current_throughput = self.stats.processed_samples / elapsed_time
-            current_throughput_gbps = processed_gb / elapsed_time
+            current_throughput_gbps = processed_content_gb / elapsed_time
             self.stats.throughput_sps = current_throughput
             self.stats.throughput_gbps = current_throughput_gbps
         else:
