@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
-标签验证脚本：验证FastText推理框架的分类正确性
-遍历整个验证集，对比预测标签与真实标签，输出P/R/F1指标
+简化标签验证脚本：只对比预测标签与真实标签是否一致
 """
 
 import pandas as pd
-import numpy as np
 import asyncio
 import aiohttp
 import time
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 from typing import List, Dict, Any
 
 class LabelValidator:
@@ -120,144 +117,48 @@ class LabelValidator:
         print(f"✅ 预测完成，耗时: {total_time:.2f}秒")
         print(f"📊 吞吐量: {len(contents) / total_time:.1f} samples/sec")
         
-        # 显示详细对比信息
-        self.show_detailed_comparison(true_labels, all_predictions)
+        # 计算匹配情况
+        correct_count = sum(1 for true, pred in zip(true_labels, all_predictions) if true == pred)
+        accuracy = correct_count / len(true_labels)
         
-        # 计算评估指标
-        self.calculate_metrics(true_labels, all_predictions)
+        print(f"\n🎯 验证结果:")
+        print(f"总样本数: {len(true_labels)}")
+        print(f"匹配样本数: {correct_count}")
+        print(f"不匹配样本数: {len(true_labels) - correct_count}")
+        print(f"匹配率: {accuracy:.4f} ({accuracy*100:.2f}%)")
         
-        # 保存详细结果
-        result_df = df.copy()
-        result_df['predicted_label'] = all_predictions
-        result_df['correct'] = result_df['FT_label'] == result_df['predicted_label']
+        # 显示前20个样本的对比
+        print(f"\n📋 前20个样本对比:")
+        print(f"{'样本':<4} {'真实标签':<15} {'预测标签':<15} {'匹配':<4}")
+        print("-" * 50)
+        for i in range(min(20, len(true_labels))):
+            match = "✅" if true_labels[i] == all_predictions[i] else "❌"
+            print(f"{i+1:<4} {true_labels[i]:<15} {all_predictions[i]:<15} {match:<4}")
         
-        # 显示样本级别详细分析
-        self.show_sample_analysis(result_df)
-        
-        # 保存结果
-        output_file = f"label_validation_results_{int(time.time())}.parquet"
-        result_df.to_parquet(output_file)
-        print(f"💾 详细结果已保存: {output_file}")
+        # 如果有不匹配的，显示前几个
+        mismatched = [(i, true, pred) for i, (true, pred) in enumerate(zip(true_labels, all_predictions)) if true != pred]
+        if mismatched:
+            print(f"\n❌ 前10个不匹配样本:")
+            print(f"{'样本':<4} {'真实标签':<15} {'预测标签':<15}")
+            print("-" * 40)
+            for i, true, pred in mismatched[:10]:
+                print(f"{i+1:<4} {true:<15} {pred:<15}")
+        else:
+            print(f"\n🎉 所有标签都匹配！")
         
         return {
-            'total_samples': len(contents),
-            'correct_predictions': sum(result_df['correct']),
-            'accuracy': sum(result_df['correct']) / len(contents),
+            'total_samples': len(true_labels),
+            'correct_predictions': correct_count,
+            'accuracy': accuracy,
             'processing_time': total_time,
-            'throughput': len(contents) / total_time
+            'throughput': len(true_labels) / total_time
         }
     
-    def show_detailed_comparison(self, true_labels: List[str], pred_labels: List[str]):
-        """显示详细的标签对比信息"""
-        print(f"\n🔍 标签格式对比:")
-        print("=" * 80)
-        
-        # 显示真实标签格式
-        true_unique = sorted(set(true_labels))
-        print(f"算法验证集标签格式: {true_unique}")
-        
-        # 显示我们的预测格式  
-        pred_unique = sorted(set(pred_labels))
-        print(f"我们服务预测格式: {pred_unique}")
-        
-        # 显示标签分布对比
-        from collections import Counter
-        true_counts = Counter(true_labels)
-        pred_counts = Counter(pred_labels)
-        
-        print(f"\n📊 标签分布对比:")
-        print(f"{'标签':<15} {'算法验证集':<10} {'我们预测':<10} {'差异':<10}")
-        print("-" * 50)
-        for label in true_unique:
-            true_count = true_counts.get(label, 0)
-            pred_count = pred_counts.get(label, 0)
-            diff = pred_count - true_count
-            print(f"{label:<15} {true_count:<10} {pred_count:<10} {diff:+<10}")
-        
-        # 显示前几个样本的详细对比
-        print(f"\n👀 前10个样本对比:")
-        print(f"{'样本':<6} {'算法标签':<15} {'我们预测':<15} {'匹配':<6}")
-        print("-" * 50)
-        for i in range(min(10, len(true_labels))):
-            match = "✅" if true_labels[i] == pred_labels[i] else "❌"
-            print(f"{i+1:<6} {true_labels[i]:<15} {pred_labels[i]:<15} {match:<6}")
+
     
-    def show_sample_analysis(self, result_df: pd.DataFrame):
-        """显示样本级别的详细分析"""
-        print(f"\n📈 错误样本详细分析:")
-        print("=" * 80)
-        
-        # 错误类型统计
-        error_samples = result_df[~result_df['correct']]
-        if len(error_samples) > 0:
-            print(f"总错误样本: {len(error_samples)}/{len(result_df)} ({len(error_samples)/len(result_df)*100:.1f}%)")
-            
-            error_stats = error_samples.groupby(['FT_label', 'predicted_label']).size()
-            print(f"\n错误类型分布:")
-            for (true_label, pred_label), count in error_stats.items():
-                pct = count / len(error_samples) * 100
-                print(f"  {true_label} → {pred_label}: {count} 个样本 ({pct:.1f}%)")
-            
-            # 显示几个具体的错误样本
-            print(f"\n🔍 错误样本示例 (前5个):")
-            error_examples = error_samples.head(5)
-            for idx, row in error_examples.iterrows():
-                content_preview = row['content'][:100] + "..." if len(row['content']) > 100 else row['content']
-                print(f"\n样本 {idx}:")
-                print(f"  内容: {content_preview}")
-                print(f"  真实标签: {row['FT_label']}")
-                print(f"  预测标签: {row['predicted_label']}")
-                print(f"  内容长度: {len(row['content'])} 字符")
-        else:
-            print(f"🎉 所有样本都预测正确！")
+
     
-    def calculate_metrics(self, true_labels: List[str], pred_labels: List[str]):
-        """计算评估指标"""
-        print(f"\n📊 标签验证结果:")
-        print("=" * 80)
-        
-        # 准确率
-        accuracy = accuracy_score(true_labels, pred_labels)
-        print(f"整体准确率: {accuracy:.4f}")
-        
-        # 分类报告
-        report = classification_report(
-            true_labels, 
-            pred_labels, 
-            target_names=['__label__0', '__label__1'],
-            digits=4
-        )
-        print(f"\n详细分类报告:")
-        print(report)
-        
-        # 混淆矩阵
-        cm = confusion_matrix(true_labels, pred_labels)
-        print(f"\n混淆矩阵:")
-        print(f"             预测")
-        print(f"真实    __label__0  __label__1")
-        print(f"__label__0    {cm[0,0]:8d}    {cm[0,1]:8d}")
-        print(f"__label__1    {cm[1,0]:8d}    {cm[1,1]:8d}")
-        
-        # 与基准对比
-        print(f"\n🎯 与基准性能对比:")
-        print(f"基准 __label__0: P=0.9902, R=0.8902, F1=0.9375")
-        print(f"基准 __label__1: P=0.6466, R=0.9579, F1=0.7721")
-        print(f"基准整体: P=0.9023, R=0.9018, F1=0.9021")
-        
-        # 问题诊断提示
-        print(f"\n🔧 问题诊断提示:")
-        if accuracy < 0.5:
-            print(f"  准确率 < 50%，可能是标签映射问题")
-        elif accuracy < 0.85:
-            print(f"  准确率 < 85%，可能是模型或预处理问题")
-        else:
-            print(f"  准确率 > 85%，框架基本正常")
-        
-        print(f"\n💡 与算法同学讨论要点:")
-        print(f"  1. 确认服务返回的 '0'/'1' 与 '__label__0'/'__label__1' 的对应关系")
-        print(f"  2. 确认模型文件是否与验证集匹配")
-        print(f"  3. 确认文本预处理是否一致")
-        print(f"  4. 确认验证集的标签定义 (__label__0=低质量? __label__1=高质量?)")
+
 
 async def main():
     import argparse
