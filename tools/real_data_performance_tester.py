@@ -93,18 +93,28 @@ class RealDataPerformanceTester:
         
         # 导入文件检测器
         import sys
-        from pathlib import Path
-        sys.path.append(str(Path(__file__).parent.parent / "implementations" / "python"))
-        from file_detector import IncrementalFileDetector
+        import os
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        parent_dir = os.path.dirname(current_dir)
+        detector_path = os.path.join(parent_dir, "implementations", "python")
+        sys.path.append(detector_path)
         
-        detector = IncrementalFileDetector(stability_window=1)  # 设置很短的窗口用于测试
+        try:
+            from file_detector import IncrementalFileDetector
+            detector = IncrementalFileDetector(stability_window=1)  # 设置很短的窗口用于测试
+        except ImportError:
+            print("⚠️ 无法导入文件检测器，跳过完整性检测")
+            detector = None
         
         corrupted_files = []
-        for file_path in parquet_files:
-            is_ready, reason = detector.is_file_ready(file_path)
-            if not is_ready and "parquet_error" in reason:
-                corrupted_files.append(file_path)
-                print(f"  ❌ 检测到损坏文件: {file_path.name} - {reason}")
+        if detector:
+            for file_path in parquet_files:
+                is_ready, reason = detector.is_file_ready(file_path)
+                if not is_ready and "parquet_error" in reason:
+                    corrupted_files.append(file_path)
+                    print(f"  ❌ 检测到损坏文件: {file_path.name} - {reason}")
+        else:
+            print("  ⚠️ 跳过文件完整性检测")
         
         print(f"📁 选中测试文件:")
         print(f"  最大文件: {largest_file.name} ({files_with_size[-1][1] / 1024**2:.1f} MB)")
