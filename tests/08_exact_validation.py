@@ -55,20 +55,21 @@ class LabelValidator:
             return "__label__0"  # 默认标签
             
         try:
-            if isinstance(pred_result, list) and len(pred_result) >= 2:
-                labels = pred_result[0]
-                scores = pred_result[1]
+            # 正确的API格式：{"labels": [...], "scores": [...]}
+            if isinstance(pred_result, dict):
+                labels = pred_result.get("labels", [])
+                scores = pred_result.get("scores", [])
                 
                 if labels and scores:
-                    # 取得分最高的
-                    max_idx = np.argmax(scores)
-                    raw_label = labels[max_idx]
+                    # 取得分最高的（第一个就是最高分）
+                    raw_label = labels[0]
                     
-                    # 转换标签格式
+                    # 确保标签格式正确
                     if raw_label.startswith('__label__'):
                         return raw_label
                     else:
                         return f"__label__{raw_label}"
+                        
         except Exception as e:
             print(f"❌ 解析预测结果失败: {e}")
         
