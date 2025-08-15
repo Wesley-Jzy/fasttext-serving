@@ -764,31 +764,32 @@ class TheStackProcessor:
             # 创建信号量控制并发
             semaphore = asyncio.Semaphore(self.config.max_concurrent)
             
-            while not self.shutdown_event.is_set():
-                # 扫描可处理的文件
-                ready_files = self.file_detector.scan_ready_files(data_dir)
-                
-                # 过滤已处理的文件
-                if self.config.resume and not self.config.performance_test:
-                    new_files = [f for f in ready_files if str(f) not in self.processed_files]
-                else:
-                    new_files = ready_files
-                
-                if not new_files:
-                    self.logger.info("⏳ 暂无新文件，等待30秒后重新扫描...")
-                    await asyncio.sleep(30)
-                    continue
-                
-                # 性能测试模式下限制文件数量
+            # 一次性扫描所有可处理的文件
+            ready_files = self.file_detector.scan_ready_files(data_dir)
+            
+            # 过滤已处理的文件
+            if self.config.resume and not self.config.performance_test:
+                files_to_process = [f for f in ready_files if str(f) not in self.processed_files]
+            else:
+                files_to_process = ready_files
+            
+            # 性能测试模式下限制文件数量
+            if self.config.performance_test:
+                files_to_process = files_to_process[:self.config.test_files_limit]
+                self.logger.info(f"🧪 性能测试模式: 限制处理 {len(files_to_process)} 个文件")
+            
+            if not files_to_process:
                 if self.config.performance_test:
-                    new_files = new_files[:self.config.test_files_limit]
-                    
-                self.stats.total_files += len(new_files)
-                self.logger.info(f"📁 发现 {len(new_files)} 个新文件待处理")
+                    self.logger.error("❌ 性能测试: 没有可处理的文件")
+                    return
+                else:
+                    self.logger.info("⏳ 暂无可处理文件，进入监控模式...")
+            else:
+                self.logger.info(f"📁 找到 {len(files_to_process)} 个文件待处理")
                 
                 # 逐个处理文件（文件级串行）
                 files_processed = 0
-                for file_path in new_files:
+                for file_path in files_to_process:
                     if self.shutdown_event.is_set():
                         break
                     
@@ -801,28 +802,46 @@ class TheStackProcessor:
                     # 处理文件
                     success = await self.process_file(file_path, semaphore)
                     
-                    if not success:
-                        self.logger.error(f"❌ 文件处理失败，跳过: {file_path.name}")
-                    else:
+                    if success:
                         files_processed += 1
-                        
-                    # 性能测试模式下，处理完指定文件数后退出
-                    if self.config.performance_test and files_processed >= self.config.test_files_limit:
-                        self.logger.info(f"✅ 性能测试完成，已处理 {files_processed} 个文件")
-                        break
+                        self.logger.info(f"✅ 完成文件 {files_processed}/{len(files_to_process)}: {file_path.name}")
+                    else:
+                        self.logger.error(f"❌ 文件处理失败，跳过: {file_path.name}")
                 
                 # 清理文件状态缓存
                 self.file_detector.cleanup_states(data_dir)
                 
-                # 性能测试模式下处理完成后退出
+                # 性能测试模式：处理完就退出
                 if self.config.performance_test:
+                    self.logger.info(f"🎉 性能测试完成！处理了 {files_processed} 个文件")
                     await self.generate_performance_report()
-                    break
+                    return
                 
-                # 如果没有更多文件，等待新文件
-                if not self.shutdown_event.is_set():
-                    self.logger.info("✅ 当前批次处理完成，等待新文件...")
-                    await asyncio.sleep(60)  # 等待1分钟再次扫描
+                self.logger.info("✅ 当前批次处理完成")
+            
+            # 生产模式：监控新文件（仅在非性能测试模式）
+            if not self.config.performance_test:
+                self.logger.info("🔄 进入增量监控模式，等待新文件...")
+                while not self.shutdown_event.is_set():
+                    await asyncio.sleep(60)  # 等待1分钟
+                    
+                    # 重新扫描新文件
+                    current_ready_files = self.file_detector.scan_ready_files(data_dir)
+                    new_files = [f for f in current_ready_files if str(f) not in self.processed_files]
+                    
+                    if new_files:
+                        self.logger.info(f"📁 发现 {len(new_files)} 个新文件，开始处理...")
+                        for file_path in new_files:
+                            if self.shutdown_event.is_set():
+                                break
+                            
+                            success = await self.process_file(file_path, semaphore)
+                            if success:
+                                self.logger.info(f"✅ 新文件处理完成: {file_path.name}")
+                            else:
+                                self.logger.error(f"❌ 新文件处理失败: {file_path.name}")
+                    else:
+                        self.logger.debug("⏳ 暂无新文件...")
         
         except Exception as e:
             self.logger.error(f"❌ 处理过程中发生异常: {e}")
