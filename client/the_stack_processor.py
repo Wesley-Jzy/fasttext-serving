@@ -35,6 +35,14 @@ class ProcessingConfig:
     resume: bool = True  # 断点续传
     save_format: str = "parquet"  # 输出格式: parquet 或 json
     log_level: str = "INFO"
+    max_workers: int = None  # 最大工作进程数，None表示自动检测
+    
+    # 性能测试相关配置
+    performance_test: bool = False  # 是否启用性能测试模式
+    test_files_limit: int = 2  # 性能测试时最大文件数
+    test_samples_per_file: int = 1000  # 每个文件最大样本数
+    enable_monitoring: bool = False  # 是否启用系统监控
+    monitoring_interval: int = 5  # 监控间隔(秒)
 
 @dataclass
 class ProcessingStats:
@@ -49,7 +57,14 @@ class ProcessingStats:
     start_time: float = 0
     current_file: str = ""
     processing_time: float = 0
+    
+    # 数据量统计（基于content字节数）
+    total_content_bytes: int = 0  # 总内容字节数
+    processed_content_bytes: int = 0  # 已处理内容字节数
+    
+    # 性能指标
     throughput_sps: float = 0  # samples per second
+    throughput_gbps: float = 0  # GB per second (基于content)
 
 class TheStackProcessor:
     """The-Stack-v2数据处理器"""
@@ -63,15 +78,264 @@ class TheStackProcessor:
         self.checkpoint_file = Path(config.output_dir) / "processing_checkpoint.json"
         self.processed_files = set()
         
+        # 性能测试相关
+        self.performance_results = []
+        self.test_start_time = None
+        self.system_monitor = None
+        
+        # 设置工作进程数
+        if config.max_workers is None:
+            # 根据CPU数量和内存情况智能设置
+            cpu_count = os.cpu_count()
+            if config.performance_test:
+                # 性能测试时可以更激进
+                self.max_workers = min(cpu_count // 2, 16)
+            else:
+                # 生产环境保守设置，避免内存问题
+                self.max_workers = min(cpu_count // 4, 8)
+        else:
+            self.max_workers = config.max_workers
+        
         # 设置日志
         self.setup_logging()
         
         # 创建输出目录
         Path(config.output_dir).mkdir(parents=True, exist_ok=True)
         
-        # 加载检查点
-        if config.resume:
+        # 加载检查点（性能测试时跳过）
+        if config.resume and not config.performance_test:
             self.load_checkpoint()
+            
+        # 启动系统监控
+        if config.enable_monitoring:
+            self.start_system_monitoring()
+            
+        # 初始化时扫描文件获取总数据量信息
+        self._initial_scan_completed = False
+    
+    def start_system_monitoring(self):
+        """启动系统监控"""
+        try:
+            import psutil
+            self.system_monitor = {
+                'enabled': True,
+                'interval': self.config.monitoring_interval,
+                'history': []
+            }
+            self.logger.info(f"✅ 启用系统监控 (间隔: {self.config.monitoring_interval}秒)")
+        except ImportError:
+            self.logger.warning("⚠️ 无法启用系统监控: 缺少psutil库")
+            self.system_monitor = None
+    
+    def record_system_stats(self):
+        """记录系统状态"""
+        if not self.system_monitor or not self.system_monitor['enabled']:
+            return
+        
+        try:
+            import psutil
+            
+            stats = {
+                'timestamp': time.time(),
+                'cpu_percent': psutil.cpu_percent(interval=0.1),
+                'memory_percent': psutil.virtual_memory().percent,
+                'memory_used_gb': psutil.virtual_memory().used / (1024**3),
+                'memory_available_gb': psutil.virtual_memory().available / (1024**3),
+                'processed_samples': self.stats.processed_samples,
+                'throughput_sps': self.stats.throughput_sps
+            }
+            
+            self.system_monitor['history'].append(stats)
+            
+            # 只保留最近的监控数据
+            if len(self.system_monitor['history']) > 1000:
+                self.system_monitor['history'] = self.system_monitor['history'][-1000:]
+                
+        except Exception as e:
+            self.logger.warning(f"⚠️ 系统监控记录失败: {e}")
+    
+    def scan_data_directory(self, data_dir: Path):
+        """扫描数据目录，计算总文件数和总数据量"""
+        if self._initial_scan_completed:
+            return
+            
+        self.logger.info("🔍 扫描数据目录，计算总量...")
+        
+        parquet_files = list(data_dir.glob("*.parquet"))
+        ready_files = []
+        total_content_bytes = 0
+        
+        for file_path in parquet_files:
+            # 跳过已处理的文件
+            if str(file_path) in self.processed_files:
+                continue
+                
+            # 检查文件完整性
+            if not self.file_detector.is_file_ready(file_path):
+                self.logger.debug(f"⏳ 文件未就绪，跳过: {file_path.name}")
+                continue
+                
+            ready_files.append(file_path)
+            
+            # 计算文件内容字节数（采样方式，避免完整加载大文件）
+            try:
+                file_content_bytes = self.estimate_file_content_bytes(file_path)
+                total_content_bytes += file_content_bytes
+            except Exception as e:
+                self.logger.warning(f"⚠️ 无法估算文件大小: {file_path.name} - {e}")
+        
+        # 性能测试模式下限制文件数
+        if self.config.performance_test:
+            ready_files = ready_files[:self.config.test_files_limit]
+            # 重新计算限制后的总数据量
+            total_content_bytes = 0
+            for file_path in ready_files:
+                try:
+                    file_content_bytes = self.estimate_file_content_bytes(file_path)
+                    total_content_bytes += file_content_bytes
+                except:
+                    pass
+        
+        self.stats.total_files = len(ready_files)
+        self.stats.total_content_bytes = total_content_bytes
+        self._initial_scan_completed = True
+        
+        self.logger.info(f"📊 扫描完成: {len(ready_files)} 个就绪文件, 总计 {total_content_bytes / (1024**3):.2f} GB 内容")
+    
+    def estimate_file_content_bytes(self, file_path: Path) -> int:
+        """估算文件中content列的总字节数"""
+        try:
+            import pandas as pd
+            
+            # 采样方式：读取前N行来估算
+            sample_size = 100 if not self.config.performance_test else 50
+            df_sample = pd.read_parquet(file_path, engine='pyarrow')
+            
+            if len(df_sample) == 0:
+                return 0
+                
+            # 限制采样行数
+            if len(df_sample) > sample_size:
+                df_sample = df_sample.head(sample_size)
+                
+            # 计算采样的content字节数
+            if 'content' not in df_sample.columns:
+                return 0
+                
+            sample_content_bytes = sum(len(str(content).encode('utf-8')) 
+                                     for content in df_sample['content'] 
+                                     if pd.notna(content))
+            
+            # 如果采样数小于总行数，按比例估算
+            if len(df_sample) == sample_size:
+                # 重新读取总行数（只读元数据，不加载数据）
+                total_rows = len(pd.read_parquet(file_path, columns=[]))
+                estimated_bytes = (sample_content_bytes / sample_size) * total_rows
+            else:
+                estimated_bytes = sample_content_bytes
+                
+            # 性能测试模式下限制每文件的样本数
+            if self.config.performance_test:
+                max_samples = self.config.test_samples_per_file
+                if len(df_sample) > 0:
+                    estimated_bytes = min(estimated_bytes, 
+                                        (sample_content_bytes / len(df_sample)) * max_samples)
+            
+            return int(estimated_bytes)
+            
+        except Exception as e:
+            self.logger.warning(f"⚠️ 估算文件内容大小失败 {file_path.name}: {e}")
+            return 0
+    
+    async def generate_performance_report(self):
+        """生成性能测试报告"""
+        if not self.config.performance_test or not self.test_start_time:
+            return
+        
+        total_time = time.time() - self.test_start_time
+        
+        # 基础性能指标
+        performance_data = {
+            "test_configuration": {
+                "max_concurrent": self.config.max_concurrent,
+                "batch_size": self.config.batch_size,
+                "max_workers": self.max_workers,
+                "test_files_limit": self.config.test_files_limit,
+                "test_samples_per_file": self.config.test_samples_per_file
+            },
+            "performance_results": {
+                "total_processing_time": total_time,
+                "total_files_processed": self.stats.processed_files,
+                "total_samples_processed": self.stats.processed_samples,
+                "successful_samples": self.stats.successful_samples,
+                "failed_samples": self.stats.failed_samples,
+                "success_rate": self.stats.successful_samples / max(self.stats.processed_samples, 1),
+                "throughput_sps": self.stats.processed_samples / max(total_time, 1),
+                "throughput_gbps": (self.stats.processed_content_bytes / (1024**3)) / max(total_time, 1),
+                "cpu_cores": os.cpu_count(),
+                "estimated_daily_capacity_samples": (self.stats.processed_samples / max(total_time, 1)) * 86400,  # 24小时
+                "estimated_daily_capacity_gb": ((self.stats.processed_content_bytes / (1024**3)) / max(total_time, 1)) * 86400
+            }
+        }
+        
+        # 系统监控数据
+        if self.system_monitor and self.system_monitor['history']:
+            cpu_usage = [s['cpu_percent'] for s in self.system_monitor['history']]
+            memory_usage = [s['memory_percent'] for s in self.system_monitor['history']]
+            
+            performance_data["system_monitoring"] = {
+                "avg_cpu_percent": sum(cpu_usage) / len(cpu_usage),
+                "max_cpu_percent": max(cpu_usage),
+                "avg_memory_percent": sum(memory_usage) / len(memory_usage),
+                "max_memory_percent": max(memory_usage),
+                "monitoring_samples": len(self.system_monitor['history'])
+            }
+        
+        # 估算不同数据量的处理时间
+        if self.stats.processed_samples > 0:
+            samples_per_sec = self.stats.processed_samples / total_time
+            
+            # 估算处理大规模数据的时间
+            estimates = {
+                "1M_samples": {"time_hours": 1_000_000 / samples_per_sec / 3600},
+                "10M_samples": {"time_hours": 10_000_000 / samples_per_sec / 3600},
+                "100M_samples": {"time_hours": 100_000_000 / samples_per_sec / 3600}
+            }
+            
+            performance_data["scale_estimates"] = estimates
+        
+        # 保存报告
+        report_file = Path(self.config.output_dir) / "performance_test_report.json"
+        with open(report_file, 'w', encoding='utf-8') as f:
+            json.dump(performance_data, f, indent=2, ensure_ascii=False)
+        
+        # 输出摘要
+        self.logger.info(f"\n" + "="*60)
+        self.logger.info(f"🏆 性能测试报告")
+        self.logger.info(f"="*60)
+        self.logger.info(f"测试配置: 并发={self.config.max_concurrent}, 批次={self.config.batch_size}")
+        self.logger.info(f"处理时间: {total_time:.1f} 秒")
+        self.logger.info(f"处理样本: {self.stats.processed_samples:,}")
+        self.logger.info(f"处理数据: {self.stats.processed_content_bytes / (1024**3):.2f} GB")
+        self.logger.info(f"成功率: {performance_data['performance_results']['success_rate']:.1%}")
+        self.logger.info(f"吞吐量: {performance_data['performance_results']['throughput_sps']:.1f} samples/sec")
+        self.logger.info(f"🎯 内容处理速度: {performance_data['performance_results']['throughput_gbps']:.3f} GB/s")
+        self.logger.info(f"预估日处理量: {performance_data['performance_results']['estimated_daily_capacity_samples']:,.0f} 样本 | {performance_data['performance_results']['estimated_daily_capacity_gb']:.1f} GB")
+        
+        if "system_monitoring" in performance_data:
+            mon = performance_data["system_monitoring"]
+            self.logger.info(f"平均CPU使用: {mon['avg_cpu_percent']:.1f}%")
+            self.logger.info(f"平均内存使用: {mon['avg_memory_percent']:.1f}%")
+        
+        if "scale_estimates" in performance_data:
+            est = performance_data["scale_estimates"]
+            self.logger.info(f"\n📊 大规模处理预估:")
+            self.logger.info(f"  100万样本: {est['1M_samples']['time_hours']:.1f} 小时")
+            self.logger.info(f"  1000万样本: {est['10M_samples']['time_hours']:.1f} 小时")
+            self.logger.info(f"  1亿样本: {est['100M_samples']['time_hours']:.1f} 小时")
+        
+        self.logger.info(f"\n💾 详细报告保存到: {report_file}")
+        self.logger.info(f"="*60)
     
     def setup_logging(self):
         """设置日志"""
@@ -339,18 +603,33 @@ class TheStackProcessor:
                 valid_data = []
                 valid_texts = []
                 
+                # 性能测试模式下限制样本数
+                max_samples = None
+                if self.config.performance_test:
+                    max_samples = self.config.test_samples_per_file
+                    self.logger.info(f"🧪 性能测试模式: 限制样本数 {max_samples}")
+                
+                sample_count = 0
+                file_content_bytes = 0  # 此文件的内容字节数
+                
                 for idx, row in df.iterrows():
+                    if max_samples and sample_count >= max_samples:
+                        break
+                        
                     content = self.preprocess_content(row.get('content', ''))
                     if content:
                         valid_data.append(row.to_dict())
                         valid_texts.append(content)
+                        # 计算内容字节数
+                        file_content_bytes += len(content.encode('utf-8'))
+                        sample_count += 1
                 
                 if not valid_texts:
                     self.logger.warning(f"⚠️ 无有效内容: {file_path.name}")
                     self.processed_files.add(str(file_path))
                     return True
                 
-                self.logger.info(f"📊 {file_path.name}: 处理 {len(valid_texts)} 个样本")
+                self.logger.info(f"📊 {file_path.name}: 处理 {len(valid_texts)} 个样本, {file_content_bytes / (1024**2):.1f} MB 内容")
                 self.stats.total_samples += len(valid_texts)
                 
                 # 分批处理
@@ -398,13 +677,24 @@ class TheStackProcessor:
                     # 更新统计和检查点
                     self.processed_files.add(str(file_path))
                     self.stats.processed_files += 1
+                    self.stats.processed_content_bytes += file_content_bytes
+                    
+                    # 计算成功和失败的样本数
+                    successful_count = sum(1 for result in all_results if result.get('prediction_valid', False))
+                    failed_count = len(all_results) - successful_count
+                    self.stats.successful_samples += successful_count
+                    self.stats.failed_samples += failed_count
                     
                     processing_time = time.time() - start_time
                     self.stats.processing_time += processing_time
                     
                     throughput = len(valid_texts) / processing_time
+                    # 计算GB/s处理速度
+                    content_gb = file_content_bytes / (1024**3)
+                    throughput_gbps = content_gb / processing_time
                     self.logger.info(f"✅ 完成: {file_path.name} "
-                                   f"({len(valid_texts)} 样本, {throughput:.1f} samples/sec)")
+                                   f"({len(valid_texts)} 样本, {throughput:.1f} samples/sec, "
+                                   f"{throughput_gbps:.3f} GB/s)")
                     
                     # 定期保存检查点
                     if self.stats.processed_files % 5 == 0:
@@ -441,38 +731,65 @@ class TheStackProcessor:
     
     def update_progress_display(self):
         """更新进度显示"""
-        if self.stats.total_files > 0:
-            file_progress = (self.stats.processed_files / self.stats.total_files) * 100
-        else:
-            file_progress = 0
-        
-        if self.stats.processing_time > 0:
-            current_throughput = self.stats.processed_samples / self.stats.processing_time
-            self.stats.throughput_sps = current_throughput
-        else:
-            current_throughput = 0
-        
         elapsed_time = time.time() - self.stats.start_time
         
-        print(f"\r📊 进度: {self.stats.processed_files}/{self.stats.total_files} 文件 "
-              f"({file_progress:.1f}%) | "
-              f"{self.stats.processed_samples} 样本 | "
+        # 文件进度
+        if self.stats.total_files > 0:
+            file_progress_pct = (self.stats.processed_files / self.stats.total_files) * 100
+            file_progress_str = f"{self.stats.processed_files}/{self.stats.total_files} ({file_progress_pct:.1f}%)"
+        else:
+            file_progress_str = f"{self.stats.processed_files}"
+        
+        # 数据量进度
+        processed_gb = self.stats.processed_content_bytes / (1024**3)
+        if self.stats.total_content_bytes > 0:
+            total_gb = self.stats.total_content_bytes / (1024**3)
+            data_progress_pct = (self.stats.processed_content_bytes / self.stats.total_content_bytes) * 100
+            data_progress_str = f"{processed_gb:.2f}/{total_gb:.2f}GB ({data_progress_pct:.1f}%)"
+        else:
+            data_progress_str = f"{processed_gb:.2f}GB"
+        
+        # 性能指标
+        if elapsed_time > 0:
+            current_throughput = self.stats.processed_samples / elapsed_time
+            current_throughput_gbps = processed_gb / elapsed_time
+            self.stats.throughput_sps = current_throughput
+            self.stats.throughput_gbps = current_throughput_gbps
+        else:
+            current_throughput = 0
+            current_throughput_gbps = 0
+        
+        print(f"\r📊 进度: 文件 {file_progress_str} | "
+              f"数据 {data_progress_str} | "
               f"{current_throughput:.1f} samples/sec | "
+              f"{current_throughput_gbps:.3f} GB/s | "
               f"用时: {elapsed_time:.0f}s", end="", flush=True)
     
     async def run(self):
         """运行主处理流程"""
-        self.logger.info(f"🚀 开始处理The-Stack-v2数据")
+        mode = "性能测试" if self.config.performance_test else "生产处理"
+        self.logger.info(f"🚀 开始处理The-Stack-v2数据 ({mode})")
         self.logger.info(f"数据目录: {self.config.data_dir}")
         self.logger.info(f"输出目录: {self.config.output_dir}")
         self.logger.info(f"API地址: {self.config.api_url}")
-        self.logger.info(f"并发数: {self.config.max_concurrent}")
+        self.logger.info(f"API并发数: {self.config.max_concurrent}")
         self.logger.info(f"批次大小: {self.config.batch_size}")
+        self.logger.info(f"CPU核心数: {os.cpu_count()}")
+        self.logger.info(f"工作进程数: {self.max_workers}")
+        
+        if self.config.performance_test:
+            self.logger.info(f"🧪 性能测试配置:")
+            self.logger.info(f"  最大文件数: {self.config.test_files_limit}")
+            self.logger.info(f"  每文件样本数: {self.config.test_samples_per_file}")
+            self.test_start_time = time.time()
         
         data_dir = Path(self.config.data_dir)
         if not data_dir.exists():
             self.logger.error(f"❌ 数据目录不存在: {data_dir}")
             return
+        
+        # 初始扫描数据目录
+        self.scan_data_directory(data_dir)
         
         self.stats.start_time = time.time()
         
@@ -503,10 +820,15 @@ class TheStackProcessor:
                     await asyncio.sleep(30)
                     continue
                 
+                # 性能测试模式下限制文件数量
+                if self.config.performance_test:
+                    new_files = new_files[:self.config.test_files_limit]
+                    
                 self.stats.total_files += len(new_files)
                 self.logger.info(f"📁 发现 {len(new_files)} 个新文件待处理")
                 
                 # 逐个处理文件（文件级串行）
+                files_processed = 0
                 for file_path in new_files:
                     if self.shutdown_event.is_set():
                         break
@@ -514,14 +836,29 @@ class TheStackProcessor:
                     # 更新进度显示
                     self.update_progress_display()
                     
+                    # 记录系统状态
+                    self.record_system_stats()
+                    
                     # 处理文件
                     success = await self.process_file(file_path, semaphore)
                     
                     if not success:
                         self.logger.error(f"❌ 文件处理失败，跳过: {file_path.name}")
+                    else:
+                        files_processed += 1
+                        
+                    # 性能测试模式下，处理完指定文件数后退出
+                    if self.config.performance_test and files_processed >= self.config.test_files_limit:
+                        self.logger.info(f"✅ 性能测试完成，已处理 {files_processed} 个文件")
+                        break
                 
                 # 清理文件状态缓存
                 self.file_detector.cleanup_states(data_dir)
+                
+                # 性能测试模式下处理完成后退出
+                if self.config.performance_test:
+                    await self.generate_performance_report()
+                    break
                 
                 # 如果没有更多文件，等待新文件
                 if not self.shutdown_event.is_set():
@@ -600,6 +937,20 @@ async def main():
                         help='输出文件格式 (默认: parquet)')
     parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], default='INFO',
                         help='日志级别 (默认: INFO)')
+    parser.add_argument('--max-workers', type=int,
+                        help='最大工作进程数 (默认: 自动检测)')
+    
+    # 性能测试相关参数
+    parser.add_argument('--performance-test', action='store_true',
+                        help='启用性能测试模式')
+    parser.add_argument('--test-files-limit', type=int, default=2,
+                        help='性能测试时最大文件数 (默认: 2)')
+    parser.add_argument('--test-samples-per-file', type=int, default=1000,
+                        help='性能测试时每文件最大样本数 (默认: 1000)')
+    parser.add_argument('--enable-monitoring', action='store_true',
+                        help='启用系统资源监控')
+    parser.add_argument('--monitoring-interval', type=int, default=5,
+                        help='系统监控间隔(秒) (默认: 5)')
     
     args = parser.parse_args()
     
@@ -614,7 +965,13 @@ async def main():
         stability_window=args.stability_window,
         resume=args.resume,
         save_format=args.save_format,
-        log_level=args.log_level
+        log_level=args.log_level,
+        max_workers=args.max_workers,
+        performance_test=args.performance_test,
+        test_files_limit=args.test_files_limit,
+        test_samples_per_file=args.test_samples_per_file,
+        enable_monitoring=args.enable_monitoring,
+        monitoring_interval=args.monitoring_interval
     )
     
     # 运行处理器
