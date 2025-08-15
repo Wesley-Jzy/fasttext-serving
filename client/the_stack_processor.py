@@ -764,14 +764,27 @@ class TheStackProcessor:
             # 创建信号量控制并发
             semaphore = asyncio.Semaphore(self.config.max_concurrent)
             
-            # 一次性扫描所有可处理的文件
-            ready_files = self.file_detector.scan_ready_files(data_dir)
+            # 扫描所有可处理的文件
+            all_parquet_files = list(data_dir.glob("*.parquet"))
+            self.logger.info(f"🔍 发现 {len(all_parquet_files)} 个parquet文件")
+            
+            all_ready_files = []
+            for file_path in all_parquet_files:
+                is_ready = self.file_detector.is_file_ready(file_path)
+                if is_ready:
+                    all_ready_files.append(file_path)
+                    self.logger.debug(f"✅ 就绪: {file_path.name}")
+                else:
+                    self.logger.info(f"⏳ 未就绪: {file_path.name}")
+            
+            self.logger.info(f"📊 其中 {len(all_ready_files)} 个文件就绪可处理")
             
             # 过滤已处理的文件
             if self.config.resume and not self.config.performance_test:
-                files_to_process = [f for f in ready_files if str(f) not in self.processed_files]
+                files_to_process = [f for f in all_ready_files if str(f) not in self.processed_files]
+                self.logger.info(f"📋 过滤后剩余 {len(files_to_process)} 个未处理文件")
             else:
-                files_to_process = ready_files
+                files_to_process = all_ready_files
             
             # 性能测试模式下限制文件数量
             if self.config.performance_test:
