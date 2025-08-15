@@ -296,7 +296,12 @@ def main():
         # 启动服务
         print(f"Starting FastText server (Python) on {args.address}:{args.port}")
         print(f"Model: {args.model}")
-        print(f"Implementation: Python with fasttext v{fasttext.__version__}")
+        # 尝试获取FastText版本号
+        try:
+            ft_version = getattr(fasttext, '__version__', 'unknown')
+        except:
+            ft_version = 'unknown'
+        print(f"Implementation: Python with fasttext v{ft_version}")
         
         app.run(
             host=args.address,
