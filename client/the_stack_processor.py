@@ -769,7 +769,7 @@ class TheStackProcessor:
                 ready_files = self.file_detector.scan_ready_files(data_dir)
                 
                 # 过滤已处理的文件
-                if self.config.resume:
+                if self.config.resume and not self.config.performance_test:
                     new_files = [f for f in ready_files if str(f) not in self.processed_files]
                 else:
                     new_files = ready_files
