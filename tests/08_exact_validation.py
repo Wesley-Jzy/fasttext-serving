@@ -46,10 +46,10 @@ class LabelValidator:
             print(f"❌ 预测异常: {e}")
             return [None for _ in batch_texts]
     
-    def parse_prediction(self, pred_result) -> str:
-        """解析预测结果，返回标签"""
+    def parse_prediction(self, pred_result) -> tuple:
+        """解析预测结果，返回(标签, 得分)"""
         if not pred_result:
-            return "__label__0"  # 默认标签
+            return ("__label__0", 0.0)  # 默认标签和得分
             
         try:
             # 正确的API格式：{"labels": [...], "scores": [...]}
@@ -60,17 +60,18 @@ class LabelValidator:
                 if labels and scores:
                     # 取得分最高的（第一个就是最高分）
                     raw_label = labels[0]
+                    score = scores[0]
                     
                     # 确保标签格式正确
                     if raw_label.startswith('__label__'):
-                        return raw_label
+                        return (raw_label, score)
                     else:
-                        return f"__label__{raw_label}"
+                        return (f"__label__{raw_label}", score)
                         
         except Exception as e:
             print(f"❌ 解析预测结果失败: {e}")
         
-        return "__label__0"  # 默认标签
+        return ("__label__0", 0.0)  # 默认标签和得分
     
     async def validate_all_labels(self, val_file: str, max_samples: int = None):
         """验证所有样本的标签分类正确性"""
@@ -84,7 +85,13 @@ class LabelValidator:
         
         print(f"📊 验证集信息:")
         print(f"  总样本数: {len(df):,}")
-        print(f"  标签分布: {df['FT_label'].value_counts().to_dict()}")
+        
+        # 显示标签分布
+        label_counts = df['FT_label'].value_counts().sort_index()
+        print(f"  FT_label分布:")
+        for label, count in label_counts.items():
+            pct = count / len(df) * 100
+            print(f"    {label}: {count:,} ({pct:.1f}%)")
         
         # 限制样本数（用于测试）
         if max_samples:
@@ -101,14 +108,18 @@ class LabelValidator:
         # 分批预测
         batch_size = 50
         all_predictions = []
+        all_scores = []
         
         for i in range(0, len(contents), batch_size):
             batch_contents = contents[i:i+batch_size]
             batch_predictions = await self.predict_batch(batch_contents, batch_size)
             
             # 转换预测结果
-            batch_labels = [self.parse_prediction(pred) for pred in batch_predictions]
+            batch_results = [self.parse_prediction(pred) for pred in batch_predictions]
+            batch_labels = [result[0] for result in batch_results]
+            batch_scores = [result[1] for result in batch_results]
             all_predictions.extend(batch_labels)
+            all_scores.extend(batch_scores)
             
             if (i // batch_size + 1) % 20 == 0:
                 print(f"  已处理: {i + len(batch_contents)}/{len(contents)} 样本")
@@ -117,32 +128,48 @@ class LabelValidator:
         print(f"✅ 预测完成，耗时: {total_time:.2f}秒")
         print(f"📊 吞吐量: {len(contents) / total_time:.1f} samples/sec")
         
+        # 计算标签分布
+        from collections import Counter
+        true_counts = Counter(true_labels)
+        pred_counts = Counter(all_predictions)
+        
+        # 显示统计信息对比
+        print(f"\n📊 标签分布对比:")
+        print(f"FT_label (验证集真实标签):")
+        for label, count in sorted(true_counts.items()):
+            pct = count / len(true_labels) * 100
+            print(f"  {label}: {count:,} ({pct:.1f}%)")
+        
+        print(f"\n我们的预测标签分布:")
+        for label, count in sorted(pred_counts.items()):
+            pct = count / len(all_predictions) * 100
+            print(f"  {label}: {count:,} ({pct:.1f}%)")
+        
         # 计算匹配情况
         correct_count = sum(1 for true, pred in zip(true_labels, all_predictions) if true == pred)
         accuracy = correct_count / len(true_labels)
         
-        print(f"\n🎯 验证结果:")
-        print(f"总样本数: {len(true_labels)}")
-        print(f"匹配样本数: {correct_count}")
-        print(f"不匹配样本数: {len(true_labels) - correct_count}")
+        print(f"\n🎯 匹配结果:")
+        print(f"总样本数: {len(true_labels):,}")
+        print(f"匹配样本数: {correct_count:,}")
+        print(f"不匹配样本数: {len(true_labels) - correct_count:,}")
         print(f"匹配率: {accuracy:.4f} ({accuracy*100:.2f}%)")
         
-        # 显示前20个样本的对比
-        print(f"\n📋 前20个样本对比:")
-        print(f"{'样本':<4} {'真实标签':<15} {'预测标签':<15} {'匹配':<4}")
-        print("-" * 50)
-        for i in range(min(20, len(true_labels))):
-            match = "✅" if true_labels[i] == all_predictions[i] else "❌"
-            print(f"{i+1:<4} {true_labels[i]:<15} {all_predictions[i]:<15} {match:<4}")
+        # 找出不匹配的样本，包含score信息
+        mismatched = []
+        for i, (true, pred, score) in enumerate(zip(true_labels, all_predictions, all_scores)):
+            if true != pred:
+                mismatched.append((i, true, pred, score))
         
-        # 如果有不匹配的，显示前几个
-        mismatched = [(i, true, pred) for i, (true, pred) in enumerate(zip(true_labels, all_predictions)) if true != pred]
         if mismatched:
-            print(f"\n❌ 前10个不匹配样本:")
-            print(f"{'样本':<4} {'真实标签':<15} {'预测标签':<15}")
-            print("-" * 40)
-            for i, true, pred in mismatched[:10]:
-                print(f"{i+1:<4} {true:<15} {pred:<15}")
+            print(f"\n❌ 不匹配样本 (前15个):")
+            print(f"{'样本':<6} {'真实标签':<15} {'预测标签':<15} {'预测得分':<10}")
+            print("-" * 55)
+            for i, true, pred, score in mismatched[:15]:
+                print(f"{i+1:<6} {true:<15} {pred:<15} {score:<10.4f}")
+            
+            if len(mismatched) > 15:
+                print(f"\n... 还有 {len(mismatched) - 15} 个不匹配样本")
         else:
             print(f"\n🎉 所有标签都匹配！")
         
@@ -151,7 +178,8 @@ class LabelValidator:
             'correct_predictions': correct_count,
             'accuracy': accuracy,
             'processing_time': total_time,
-            'throughput': len(true_labels) / total_time
+            'throughput': len(true_labels) / total_time,
+            'mismatched_samples': len(mismatched)
         }
     
 
