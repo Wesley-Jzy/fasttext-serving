@@ -90,7 +90,13 @@ class RealDataPerformanceTester:
         
         # 检测损坏的文件（用我们的文件检测器）
         print(f"🔍 检测文件完整性...")
-        from implementations.python.file_detector import IncrementalFileDetector
+        
+        # 导入文件检测器
+        import sys
+        from pathlib import Path
+        sys.path.append(str(Path(__file__).parent.parent / "implementations" / "python"))
+        from file_detector import IncrementalFileDetector
+        
         detector = IncrementalFileDetector(stability_window=1)  # 设置很短的窗口用于测试
         
         corrupted_files = []
