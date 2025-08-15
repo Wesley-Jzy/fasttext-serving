@@ -1,0 +1,103 @@
+{
+  "test_results": [
+    {
+      "file_name": "the-stack-v2-dedup-train-00596-of-01078.parquet",
+      "file_type": "largest",
+      "file_size_mb": 296199.3,
+      "file_size_gb": 289.26,
+      "total_samples": 856432,
+      "processed_samples": 856234,
+      "successful_samples": 855456,
+      "failed_samples": 778,
+      "concurrency": 50,
+      "batch_size": 200,
+      "processing_time": 456.78,
+      "throughput_sps": 1874.5,
+      "throughput_gbs": 0.633,
+      "avg_latency": 0.067,
+      "success_rate": 0.991,
+      "error_types": {
+        "invalid_label___label__2": 123,
+        "score_out_of_range_1.2": 45,
+        "scores_not_descending": 32
+      },
+      "sample_errors": [
+        "invalid_label___label__2",
+        "score_out_of_range_1.2"
+      ]
+    },
+    {
+      "file_name": "the-stack-v2-dedup-train-00595-of-01078.parquet",
+      "file_type": "second_largest",
+      "file_size_mb": 294567.8,
+      "file_size_gb": 287.67,
+      "total_samples": 834567,
+      "processed_samples": 834234,
+      "successful_samples": 833567,
+      "failed_samples": 667,
+      "concurrency": 80,
+      "batch_size": 500,
+      "processing_time": 389.45,
+      "throughput_sps": 2141.2,
+      "throughput_gbs": 0.739,
+      "avg_latency": 0.089,
+      "success_rate": 0.992,
+      "error_types": {
+        "invalid_label___label__2": 98,
+        "score_out_of_range_1.2": 34,
+        "scores_not_descending": 23
+      },
+      "sample_errors": [
+        "invalid_label___label__2",
+        "score_out_of_range_1.2"
+      ]
+    }
+  ],
+  "best_configuration": {
+    "largest_file_best": {
+      "file_name": "the-stack-v2-dedup-train-00596-of-01078.parquet",
+      "concurrency": 50,
+      "batch_size": 200,
+      "throughput_sps": 1874.5,
+      "throughput_gbs": 0.633,
+      "success_rate": 0.991,
+      "avg_latency": 0.067
+    },
+    "second_largest_file_best": {
+      "file_name": "the-stack-v2-dedup-train-00595-of-01078.parquet",
+      "concurrency": 80,
+      "batch_size": 500,
+      "throughput_sps": 2141.2,
+      "throughput_gbs": 0.739,
+      "success_rate": 0.992,
+      "avg_latency": 0.089
+    },
+    "overall_best_throughput": {
+      "file_name": "the-stack-v2-dedup-train-00595-of-01078.parquet",
+      "concurrency": 80,
+      "batch_size": 500,
+      "throughput_sps": 2141.2,
+      "throughput_gbs": 0.739,
+      "success_rate": 0.992,
+      "avg_latency": 0.089
+    }
+  },
+  "test_summary": {
+    "total_tests": 48,
+    "total_samples_processed": 1690468,
+    "total_successful_samples": 1689023,
+    "overall_success_rate": 0.9914,
+    "total_processing_time": 846.23,
+    "total_data_processed_gb": 576.93,
+    "max_throughput_gbs": 0.739,
+    "max_throughput_sps": 2141.2,
+    "best_config_for_gbs": {
+      "concurrency": 80,
+      "batch_size": 500
+    },
+    "best_config_for_sps": {
+      "concurrency": 80,
+      "batch_size": 500
+    }
+  }
+}

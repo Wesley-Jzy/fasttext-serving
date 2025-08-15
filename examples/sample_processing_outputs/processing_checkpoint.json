@@ -1,0 +1,22 @@
+{
+  "processed_files": [
+    "/mnt/project/yifan/data/the-stack-v2-dedup_batched_download/the-stack-v2-dedup-train-00001-of-01078.parquet",
+    "/mnt/project/yifan/data/the-stack-v2-dedup_batched_download/the-stack-v2-dedup-train-00002-of-01078.parquet",
+    "/mnt/project/yifan/data/the-stack-v2-dedup_batched_download/the-stack-v2-dedup-train-00003-of-01078.parquet",
+    "/mnt/project/yifan/data/the-stack-v2-dedup_batched_download/the-stack-v2-dedup-train-00004-of-01078.parquet",
+    "/mnt/project/yifan/data/the-stack-v2-dedup_batched_download/the-stack-v2-dedup-train-00005-of-01078.parquet"
+  ],
+  "last_update": 1755295010.409703,
+  "stats": {
+    "total_files": 1078,
+    "processed_files": 5,
+    "skipped_files": 0,
+    "total_samples": 156789,
+    "processed_samples": 156234,
+    "successful_samples": 155456,
+    "failed_samples": 778,
+    "start_time": 1755291410.4097033,
+    "processing_time": 3456.78,
+    "throughput_sps": 45.2
+  }
+}

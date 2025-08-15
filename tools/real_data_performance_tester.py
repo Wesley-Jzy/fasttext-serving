@@ -70,8 +70,8 @@ class RealDataPerformanceTester:
         if self.session:
             await self.session.close()
     
-    def find_test_files(self) -> Tuple[Path, Path]:
-        """找到最大和最小的parquet文件"""
+    def find_test_files(self) -> Tuple[Path, Path, List[Path]]:
+        """找到最大的两个parquet文件，并返回所有损坏的文件"""
         data_dir = Path(self.config.data_dir)
         if not data_dir.exists():
             raise FileNotFoundError(f"数据目录不存在: {data_dir}")
@@ -84,14 +84,28 @@ class RealDataPerformanceTester:
         files_with_size = [(f, f.stat().st_size) for f in parquet_files]
         files_with_size.sort(key=lambda x: x[1])
         
-        smallest_file = files_with_size[0][0]
+        # 选择最大的两个文件
         largest_file = files_with_size[-1][0]
+        second_largest_file = files_with_size[-2][0]
+        
+        # 检测损坏的文件（用我们的文件检测器）
+        print(f"🔍 检测文件完整性...")
+        from implementations.python.file_detector import IncrementalFileDetector
+        detector = IncrementalFileDetector(stability_window=1)  # 设置很短的窗口用于测试
+        
+        corrupted_files = []
+        for file_path in parquet_files:
+            is_ready, reason = detector.is_file_ready(file_path)
+            if not is_ready and "parquet_error" in reason:
+                corrupted_files.append(file_path)
+                print(f"  ❌ 检测到损坏文件: {file_path.name} - {reason}")
         
         print(f"📁 选中测试文件:")
-        print(f"  最小文件: {smallest_file.name} ({files_with_size[0][1] / 1024**2:.1f} MB)")
         print(f"  最大文件: {largest_file.name} ({files_with_size[-1][1] / 1024**2:.1f} MB)")
+        print(f"  第二大文件: {second_largest_file.name} ({files_with_size[-2][1] / 1024**2:.1f} MB)")
+        print(f"  发现损坏文件: {len(corrupted_files)} 个")
         
-        return smallest_file, largest_file
+        return largest_file, second_largest_file, corrupted_files
     
     def load_file_data(self, file_path: Path) -> Tuple[List[str], int, float]:
         """加载文件数据并预处理"""
@@ -342,7 +356,7 @@ class RealDataPerformanceTester:
         
         # 选择测试文件
         try:
-            smallest_file, largest_file = self.find_test_files()
+            largest_file, second_largest_file, corrupted_files = self.find_test_files()
         except Exception as e:
             print(f"❌ 选择测试文件失败: {e}")
             return {}
@@ -350,10 +364,10 @@ class RealDataPerformanceTester:
         # 测试结果
         all_results = []
         
-        # 测试两个文件，每个文件用不同配置
+        # 测试两个最大的文件，每个文件用不同配置
         test_files = [
-            ("smallest", smallest_file),
-            ("largest", largest_file)
+            ("largest", largest_file),
+            ("second_largest", second_largest_file)
         ]
         
         for file_type, file_path in test_files:
@@ -388,8 +402,8 @@ class RealDataPerformanceTester:
             return {}
         
         # 按文件类型分组
-        smallest_results = [r for r in results if r['file_type'] == 'smallest']
         largest_results = [r for r in results if r['file_type'] == 'largest']
+        second_largest_results = [r for r in results if r['file_type'] == 'second_largest']
         
         def find_best(file_results: List[Dict], criteria: str = "throughput_gbs") -> Dict:
             """找到最佳配置"""
@@ -414,8 +428,8 @@ class RealDataPerformanceTester:
             }
         
         return {
-            "smallest_file_best": find_best(smallest_results),
             "largest_file_best": find_best(largest_results),
+            "second_largest_file_best": find_best(second_largest_results),
             "overall_best_throughput": find_best(results, "throughput_gbs"),
             "overall_best_sps": find_best(results, "throughput_sps")
         }
