@@ -528,145 +528,197 @@ class TheStackProcessor:
         except Exception as e:
             return False, f"validation_exception_{str(e)}"
     
-    async def process_file(self, file_path: Path, semaphore: asyncio.Semaphore) -> bool:
-        """处理单个文件"""
-        async with semaphore:
-            start_time = time.time()
+    async def _process_batch(self, batch_texts: List[str], batch_data: List[Dict], semaphore: asyncio.Semaphore) -> Tuple[List[Dict], int, int]:
+        """处理单个批次的数据"""
+        try:
+            # 使用信号量控制并发
+            async with semaphore:
+                predictions = await self.predict_batch(batch_texts)
             
-            # 检查是否已处理
-            if self.config.resume and str(file_path) in self.processed_files:
-                self.logger.info(f"⏭️ 跳过已处理文件: {file_path.name}")
-                self.stats.skipped_files += 1
+            # 后处理
+            batch_results = self.postprocess_results(batch_data, predictions)
+            
+            # 计算成功和失败数量
+            valid_count = sum(1 for r in batch_results if r.get('prediction_valid', False))
+            failed_count = len(batch_results) - valid_count
+            
+            return batch_results, valid_count, failed_count
+        
+        except Exception as e:
+            self.logger.error(f"❌ 批次处理异常: {e}")
+            # 返回错误结果
+            error_results = []
+            for data in batch_data:
+                error_result = data.copy()
+                error_result.update({
+                    'predicted_label': None,
+                    'prediction_score': 0.0,
+                    'prediction_valid': False,
+                    'prediction_error': str(e)
+                })
+                error_results.append(error_result)
+            
+            return error_results, 0, len(batch_data)
+    
+    async def _process_file_with_monitoring(self, file_path: Path, semaphore: asyncio.Semaphore) -> bool:
+        """带监控的文件处理包装器"""
+        async with semaphore:
+            # 更新进度显示
+            self.update_progress_display()
+            
+            # 记录系统状态
+            self.record_system_stats()
+            
+            # 处理文件
+            return await self.process_file(file_path)
+    
+    async def process_file(self, file_path: Path) -> bool:
+        """处理单个文件 - 移除文件级信号量，支持真正的并发"""
+        start_time = time.time()
+        
+        # 检查是否已处理
+        if self.config.resume and str(file_path) in self.processed_files:
+            self.logger.info(f"⏭️ 跳过已处理文件: {file_path.name}")
+            self.stats.skipped_files += 1
+            return True
+        
+        self.stats.current_file = file_path.name
+        self.logger.info(f"📄 开始处理: {file_path.name}")
+        
+        try:
+            # 使用流式分批读取，避免大文件内存爆炸
+            import pyarrow.parquet as pq
+            
+            parquet_file = pq.ParquetFile(file_path)
+            total_rows = parquet_file.metadata.num_rows
+            
+            if total_rows == 0:
+                self.logger.warning(f"⚠️ 空文件: {file_path.name}")
+                self.processed_files.add(str(file_path))
                 return True
             
-            self.stats.current_file = file_path.name
-            self.logger.info(f"📄 开始处理: {file_path.name}")
+            # 检查必需列
+            schema = parquet_file.schema_arrow
+            if 'content' not in schema.names:
+                self.logger.error(f"❌ 缺少content列: {file_path.name}")
+                return False
             
-            try:
-                # 使用流式分批读取，避免大文件内存爆炸
-                import pyarrow.parquet as pq
+            # 计算动态缓存大小：基于当前并发配置
+            # cache_size = 并发数 * 批次大小 * 缓冲倍数
+            cache_size = self.config.max_concurrent * self.config.batch_size * 3
+            
+            # 性能测试模式下限制样本数
+            max_samples = None
+            if self.config.performance_test:
+                max_samples = self.config.test_samples_per_file
+                self.logger.info(f"🧪 性能测试模式: 限制样本数 {max_samples}")
+            
+            self.logger.info(f"📊 {file_path.name}: 总行数 {total_rows:,}, 缓存大小 {cache_size:,}")
+            
+            # 流式处理：分批读取和处理
+            all_results = []
+            file_content_bytes = 0
+            processed_count = 0
+            
+            # 创建API信号量用于批次级别的并发控制
+            api_semaphore = asyncio.Semaphore(self.config.max_concurrent)
+            
+            for batch in parquet_file.iter_batches(batch_size=cache_size):
+                # 转换为pandas DataFrame进行处理
+                df_chunk = batch.to_pandas()
                 
-                parquet_file = pq.ParquetFile(file_path)
-                total_rows = parquet_file.metadata.num_rows
+                # 预处理这个chunk的数据
+                chunk_data = []
+                chunk_texts = []
                 
-                if total_rows == 0:
-                    self.logger.warning(f"⚠️ 空文件: {file_path.name}")
-                    self.processed_files.add(str(file_path))
-                    return True
-                
-                # 检查必需列
-                schema = parquet_file.schema_arrow
-                if 'content' not in schema.names:
-                    self.logger.error(f"❌ 缺少content列: {file_path.name}")
-                    return False
-                
-                # 计算动态缓存大小：基于当前并发配置
-                # cache_size = 并发数 * 批次大小 * 缓冲倍数
-                cache_size = self.config.max_concurrent * self.config.batch_size * 3
-                
-                # 性能测试模式下限制样本数
-                max_samples = None
-                if self.config.performance_test:
-                    max_samples = self.config.test_samples_per_file
-                    self.logger.info(f"🧪 性能测试模式: 限制样本数 {max_samples}")
-                
-                self.logger.info(f"📊 {file_path.name}: 总行数 {total_rows:,}, 缓存大小 {cache_size:,}")
-                
-                # 流式处理：分批读取和处理
-                all_results = []
-                file_content_bytes = 0
-                processed_count = 0
-                
-                for batch in parquet_file.iter_batches(batch_size=cache_size):
-                    # 转换为pandas DataFrame进行处理
-                    df_chunk = batch.to_pandas()
-                    
-                    # 预处理这个chunk的数据
-                    chunk_data = []
-                    chunk_texts = []
-                    
-                    for idx, row in df_chunk.iterrows():
-                        # 检查是否达到样本限制
-                        if max_samples and processed_count >= max_samples:
-                            break
-                            
-                        content = self.preprocess_content(row.get('content', ''))
-                        if content:
-                            chunk_data.append(row.to_dict())
-                            chunk_texts.append(content)
-                            file_content_bytes += len(content.encode('utf-8'))
-                            processed_count += 1
-                    
-                    if not chunk_texts:
-                        continue
-                    
-                    # 分批处理这个chunk的数据
-                    chunk_results = []
-                    for i in range(0, len(chunk_texts), self.config.batch_size):
-                        batch_texts = chunk_texts[i:i + self.config.batch_size]
-                        batch_data = chunk_data[i:i + self.config.batch_size]
-                        
-                        if not batch_texts:
-                            continue
-                        
-                        # 异步推理（信号量控制在外层）
-                        async with semaphore:
-                            predictions = await self.predict_batch(batch_texts)
-                        
-                        # 后处理
-                        batch_results = self.postprocess_results(batch_data, predictions)
-                        chunk_results.extend(batch_results)
-                        
-                        # 更新统计
-                        valid_count = sum(1 for r in batch_results if r.get('prediction_valid', False))
-                        self.stats.successful_samples += valid_count
-                        self.stats.failed_samples += len(batch_results) - valid_count
-                    
-                    all_results.extend(chunk_results)
-                    
+                for idx, row in df_chunk.iterrows():
                     # 检查是否达到样本限制
                     if max_samples and processed_count >= max_samples:
                         break
+                        
+                    content = self.preprocess_content(row.get('content', ''))
+                    if content:
+                        chunk_data.append(row.to_dict())
+                        chunk_texts.append(content)
+                        file_content_bytes += len(content.encode('utf-8'))
+                        processed_count += 1
                 
-                if not all_results:
-                    self.logger.warning(f"⚠️ 无有效内容: {file_path.name}")
-                    self.processed_files.add(str(file_path))
-                    return True
+                if not chunk_texts:
+                    continue
                 
-                self.logger.info(f"📊 {file_path.name}: 流式处理完成 {processed_count} 个样本, {file_content_bytes / (1024**2):.1f} MB 内容")
-                self.stats.total_samples += processed_count
+                # 创建批次处理任务列表
+                batch_tasks = []
+                for i in range(0, len(chunk_texts), self.config.batch_size):
+                    batch_texts = chunk_texts[i:i + self.config.batch_size]
+                    batch_data = chunk_data[i:i + self.config.batch_size]
+                    
+                    if not batch_texts:
+                        continue
+                    
+                    # 创建批次处理协程
+                    task = self._process_batch(batch_texts, batch_data, api_semaphore)
+                    batch_tasks.append(task)
                 
-                # 保存结果
-                success = await self.save_file_results(file_path, all_results)
+                # 并发执行所有批次
+                if batch_tasks:
+                    batch_results_list = await asyncio.gather(*batch_tasks, return_exceptions=True)
+                    
+                    # 处理结果
+                    for result in batch_results_list:
+                        if isinstance(result, Exception):
+                            self.logger.error(f"❌ 批次处理失败: {result}")
+                            continue
+                        
+                        batch_results, valid_count, failed_count = result
+                        all_results.extend(batch_results)
+                        
+                        # 更新统计
+                        self.stats.successful_samples += valid_count
+                        self.stats.failed_samples += failed_count
                 
-                if success:
-                    # 更新统计和检查点
-                    self.processed_files.add(str(file_path))
-                    self.stats.processed_files += 1
-                    self.stats.processed_content_bytes += file_content_bytes
-                    
-                    processing_time = time.time() - start_time
-                    self.stats.processing_time += processing_time
-                    
-                    throughput = processed_count / processing_time
-                    # 计算GB/s处理速度
-                    content_gb = file_content_bytes / (1024**3)
-                    throughput_gbps = content_gb / processing_time
-                    self.logger.info(f"✅ 完成: {file_path.name} "
-                                   f"({processed_count} 样本, {throughput:.1f} samples/sec, "
-                                   f"{throughput_gbps:.3f} GB/s)")
-                    
-                    # 定期保存检查点
-                    if self.stats.processed_files % 5 == 0:
-                        self.save_checkpoint()
-                    
-                    return True
-                else:
-                    return False
-                    
-            except Exception as e:
-                self.logger.error(f"❌ 处理文件失败: {file_path.name} - {e}")
+                # 检查是否达到样本限制
+                if max_samples and processed_count >= max_samples:
+                    break
+            
+            if not all_results:
+                self.logger.warning(f"⚠️ 无有效内容: {file_path.name}")
+                self.processed_files.add(str(file_path))
+                return True
+            
+            self.logger.info(f"📊 {file_path.name}: 流式处理完成 {processed_count} 个样本, {file_content_bytes / (1024**2):.1f} MB 内容")
+            self.stats.total_samples += processed_count
+            
+            # 保存结果
+            success = await self.save_file_results(file_path, all_results)
+            
+            if success:
+                # 更新统计和检查点
+                self.processed_files.add(str(file_path))
+                self.stats.processed_files += 1
+                self.stats.processed_content_bytes += file_content_bytes
+                
+                processing_time = time.time() - start_time
+                self.stats.processing_time += processing_time
+                
+                throughput = processed_count / processing_time if processing_time > 0 else 0
+                # 计算GB/s处理速度
+                content_gb = file_content_bytes / (1024**3)
+                throughput_gbps = content_gb / processing_time if processing_time > 0 else 0
+                self.logger.info(f"✅ 完成: {file_path.name} "
+                               f"({processed_count} 样本, {throughput:.1f} samples/sec, "
+                               f"{throughput_gbps:.3f} GB/s)")
+                
+                # 定期保存检查点
+                if self.stats.processed_files % 5 == 0:
+                    self.save_checkpoint()
+                
+                return True
+            else:
                 return False
+                
+        except Exception as e:
+            self.logger.error(f"❌ 处理文件失败: {file_path.name} - {e}")
+            return False
     
     async def save_file_results(self, original_file: Path, results: List[Dict]) -> bool:
         """保存单个文件的处理结果"""
@@ -801,26 +853,36 @@ class TheStackProcessor:
             else:
                 self.logger.info(f"📁 找到 {len(files_to_process)} 个文件待处理")
                 
-                # 逐个处理文件（文件级串行）
-                files_processed = 0
+                # 文件级并发处理
+                # 限制同时处理的文件数量，避免内存爆炸
+                max_concurrent_files = min(self.max_workers, len(files_to_process))
+                file_semaphore = asyncio.Semaphore(max_concurrent_files)
+                
+                self.logger.info(f"🔄 启动文件级并发处理，最大并发文件数: {max_concurrent_files}")
+                
+                # 创建文件处理任务
+                file_tasks = []
                 for file_path in files_to_process:
-                    if self.shutdown_event.is_set():
-                        break
+                    task = self._process_file_with_monitoring(file_path, file_semaphore)
+                    file_tasks.append(task)
+                
+                # 并发执行所有文件处理任务
+                if file_tasks:
+                    results = await asyncio.gather(*file_tasks, return_exceptions=True)
                     
-                    # 更新进度显示
-                    self.update_progress_display()
-                    
-                    # 记录系统状态
-                    self.record_system_stats()
-                    
-                    # 处理文件
-                    success = await self.process_file(file_path, semaphore)
-                    
-                    if success:
-                        files_processed += 1
-                        self.logger.info(f"✅ 完成文件 {files_processed}/{len(files_to_process)}: {file_path.name}")
-                    else:
-                        self.logger.error(f"❌ 文件处理失败，跳过: {file_path.name}")
+                    # 统计处理结果
+                    files_processed = 0
+                    for i, result in enumerate(results):
+                        file_path = files_to_process[i]
+                        if isinstance(result, Exception):
+                            self.logger.error(f"❌ 文件处理异常: {file_path.name} - {result}")
+                        elif result:
+                            files_processed += 1
+                            self.logger.info(f"✅ 完成文件 {files_processed}/{len(files_to_process)}: {file_path.name}")
+                        else:
+                            self.logger.error(f"❌ 文件处理失败，跳过: {file_path.name}")
+                
+                self.logger.info(f"🎉 并发处理完成: {files_processed}/{len(files_to_process)} 个文件成功")
                 
                 # 清理文件状态缓存
                 self.file_detector.cleanup_states(data_dir)
@@ -849,7 +911,7 @@ class TheStackProcessor:
                             if self.shutdown_event.is_set():
                                 break
                             
-                            success = await self.process_file(file_path, semaphore)
+                            success = await self.process_file(file_path)
                             if success:
                                 self.logger.info(f"✅ 新文件处理完成: {file_path.name}")
                             else:
