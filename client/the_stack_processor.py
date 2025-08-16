@@ -141,7 +141,7 @@ class TheStackProcessor:
                 'memory_percent': psutil.virtual_memory().percent,
                 'memory_used_gb': psutil.virtual_memory().used / (1024**3),
                 'memory_available_gb': psutil.virtual_memory().available / (1024**3),
-                'processed_samples': self.stats.processed_samples,
+                'processed_samples': self.stats.total_samples,
                 'throughput_sps': self.stats.throughput_sps
             }
             
@@ -223,14 +223,14 @@ class TheStackProcessor:
             "performance_results": {
                 "total_processing_time": total_time,
                 "total_files_processed": self.stats.processed_files,
-                "total_samples_processed": self.stats.processed_samples,
+                "total_samples_processed": self.stats.total_samples,
                 "successful_samples": self.stats.successful_samples,
                 "failed_samples": self.stats.failed_samples,
-                "success_rate": self.stats.successful_samples / max(self.stats.processed_samples, 1),
-                "throughput_sps": self.stats.processed_samples / max(total_time, 1),
+                "success_rate": self.stats.successful_samples / max(self.stats.total_samples, 1),
+                "throughput_sps": self.stats.total_samples / max(total_time, 1),
                 "throughput_gbps": (self.stats.processed_content_bytes / (1024**3)) / max(total_time, 1),
                 "cpu_cores": os.cpu_count(),
-                "estimated_daily_capacity_samples": (self.stats.processed_samples / max(total_time, 1)) * 86400,  # 24小时
+                "estimated_daily_capacity_samples": (self.stats.total_samples / max(total_time, 1)) * 86400,  # 24小时
                 "estimated_daily_capacity_gb": ((self.stats.processed_content_bytes / (1024**3)) / max(total_time, 1)) * 86400
             }
         }
@@ -249,8 +249,8 @@ class TheStackProcessor:
             }
         
         # 估算不同数据量的处理时间
-        if self.stats.processed_samples > 0:
-            samples_per_sec = self.stats.processed_samples / total_time
+        if self.stats.total_samples > 0:
+            samples_per_sec = self.stats.total_samples / total_time
             
             # 估算处理大规模数据的时间
             estimates = {
@@ -272,7 +272,7 @@ class TheStackProcessor:
         self.logger.info(f"="*60)
         self.logger.info(f"测试配置: 并发={self.config.max_concurrent}, 批次={self.config.batch_size}")
         self.logger.info(f"处理时间: {total_time:.1f} 秒")
-        self.logger.info(f"处理样本: {self.stats.processed_samples:,}")
+        self.logger.info(f"处理样本: {self.stats.total_samples:,}")
         self.logger.info(f"处理数据: {self.stats.processed_content_bytes / (1024**3):.2f} GB")
         self.logger.info(f"成功率: {performance_data['performance_results']['success_rate']:.1%}")
         self.logger.info(f"吞吐量: {performance_data['performance_results']['throughput_sps']:.1f} samples/sec")
@@ -711,7 +711,7 @@ class TheStackProcessor:
         
         # 性能指标
         if elapsed_time > 0:
-            current_throughput = self.stats.processed_samples / elapsed_time
+            current_throughput = self.stats.total_samples / elapsed_time
             current_throughput_gbps = processed_content_gb / elapsed_time
             self.stats.throughput_sps = current_throughput
             self.stats.throughput_gbps = current_throughput_gbps
@@ -870,14 +870,14 @@ class TheStackProcessor:
             print(f"  总处理时间: {total_time:.1f} 秒")
             print(f"  处理文件数: {self.stats.processed_files}")
             print(f"  跳过文件数: {self.stats.skipped_files}")
-            print(f"  处理样本数: {self.stats.processed_samples}")
+            print(f"  处理样本数: {self.stats.total_samples}")
             print(f"  成功样本数: {self.stats.successful_samples}")
             print(f"  失败样本数: {self.stats.failed_samples}")
-            if self.stats.processed_samples > 0:
-                success_rate = (self.stats.successful_samples / self.stats.processed_samples) * 100
+            if self.stats.total_samples > 0:
+                success_rate = (self.stats.successful_samples / self.stats.total_samples) * 100
                 print(f"  成功率: {success_rate:.1f}%")
             if total_time > 0:
-                overall_throughput = self.stats.processed_samples / total_time
+                overall_throughput = self.stats.total_samples / total_time
                 print(f"  平均吞吐量: {overall_throughput:.1f} samples/sec")
 
 async def main():
