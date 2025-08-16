@@ -16,7 +16,10 @@ RUN apt-get update && \
 COPY fastText/ ./fastText/
 RUN cd fastText && pip install .
 
-# 复制并安装Python依赖
+# 安装基础依赖
+RUN pip install flask "numpy>=1.21.0,<2.0.0" gunicorn psutil
+
+# 复制并安装完整依赖
 COPY implementations/python/requirements.txt ./requirements.txt
 RUN pip install -r requirements.txt
 
