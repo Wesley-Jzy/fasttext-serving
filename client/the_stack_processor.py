@@ -78,6 +78,11 @@ class TheStackProcessor:
         self.checkpoint_file = Path(config.output_dir) / "processing_checkpoint.json"
         self.processed_files = set()
         
+        # 并发安全锁
+        self._stats_lock = asyncio.Lock()
+        self._checkpoint_lock = asyncio.Lock()
+        self._processed_files_lock = asyncio.Lock()
+        
         # 性能测试相关
         self.performance_results = []
         self.test_start_time = None
@@ -442,8 +447,20 @@ class TheStackProcessor:
                     # 返回默认结果
                     return [self._get_default_prediction() for _ in texts]
                     
+        except asyncio.TimeoutError:
+            self.logger.error(f"预测请求超时: {self.config.timeout}秒超时")
+            return [self._get_default_prediction() for _ in texts]
+        except aiohttp.ClientConnectorError as e:
+            self.logger.error(f"连接错误: 无法连接到 {self.config.api_url} - {e}")
+            return [self._get_default_prediction() for _ in texts]
+        except aiohttp.ClientError as e:
+            self.logger.error(f"HTTP客户端错误: {type(e).__name__} - {e}")
+            return [self._get_default_prediction() for _ in texts]
         except Exception as e:
-            self.logger.error(f"预测请求异常: {e}")
+            error_type = type(e).__name__
+            error_msg = str(e) if str(e) else "未知错误"
+            self.logger.error(f"预测请求异常: {error_type} - {error_msg}")
+            self.logger.error(f"请求详情: URL={self.config.api_url}/predict, 批次大小={len(texts)}")
             return [self._get_default_prediction() for _ in texts]
     
     def _get_default_prediction(self) -> Dict[str, Any]:
@@ -579,7 +596,8 @@ class TheStackProcessor:
         # 检查是否已处理
         if self.config.resume and str(file_path) in self.processed_files:
             self.logger.info(f"⏭️ 跳过已处理文件: {file_path.name}")
-            self.stats.skipped_files += 1
+            async with self._stats_lock:
+                self.stats.skipped_files += 1
             return True
         
         self.stats.current_file = file_path.name
@@ -672,9 +690,10 @@ class TheStackProcessor:
                         batch_results, valid_count, failed_count = result
                         all_results.extend(batch_results)
                         
-                        # 更新统计
-                        self.stats.successful_samples += valid_count
-                        self.stats.failed_samples += failed_count
+                        # 更新统计（并发安全）
+                        async with self._stats_lock:
+                            self.stats.successful_samples += valid_count
+                            self.stats.failed_samples += failed_count
                 
                 # 检查是否达到样本限制
                 if max_samples and processed_count >= max_samples:
@@ -682,23 +701,33 @@ class TheStackProcessor:
             
             if not all_results:
                 self.logger.warning(f"⚠️ 无有效内容: {file_path.name}")
-                self.processed_files.add(str(file_path))
+                async with self._processed_files_lock:
+                    self.processed_files.add(str(file_path))
                 return True
             
             self.logger.info(f"📊 {file_path.name}: 流式处理完成 {processed_count} 个样本, {file_content_bytes / (1024**2):.1f} MB 内容")
-            self.stats.total_samples += processed_count
+            
+            # 更新文件级统计（并发安全）
+            async with self._stats_lock:
+                self.stats.total_samples += processed_count
             
             # 保存结果
             success = await self.save_file_results(file_path, all_results)
             
             if success:
-                # 更新统计和检查点
-                self.processed_files.add(str(file_path))
-                self.stats.processed_files += 1
-                self.stats.processed_content_bytes += file_content_bytes
+                # 更新统计和检查点（并发安全）
+                async with self._processed_files_lock:
+                    self.processed_files.add(str(file_path))
                 
-                processing_time = time.time() - start_time
-                self.stats.processing_time += processing_time
+                # 更新统计（并发安全）
+                async with self._stats_lock:
+                    self.stats.processed_files += 1
+                    self.stats.processed_content_bytes += file_content_bytes
+                    processing_time = time.time() - start_time
+                    self.stats.processing_time += processing_time
+                    
+                    # 检查是否需要保存检查点
+                    should_save_checkpoint = (self.stats.processed_files % 5 == 0)
                 
                 throughput = processed_count / processing_time if processing_time > 0 else 0
                 # 计算GB/s处理速度
@@ -708,9 +737,10 @@ class TheStackProcessor:
                                f"({processed_count} 样本, {throughput:.1f} samples/sec, "
                                f"{throughput_gbps:.3f} GB/s)")
                 
-                # 定期保存检查点
-                if self.stats.processed_files % 5 == 0:
-                    self.save_checkpoint()
+                # 定期保存检查点（并发安全）
+                if should_save_checkpoint:
+                    async with self._checkpoint_lock:
+                        self.save_checkpoint()
                 
                 return True
             else:
