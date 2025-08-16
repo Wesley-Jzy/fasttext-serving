@@ -14,9 +14,9 @@ structlog>=23.1.0           # 结构化日志
 pytest>=7.0.0              # 测试框架
 requests>=2.28.0           # HTTP客户端（测试用）
 
-# 可选：性能优化
-gunicorn>=21.0.0           # WSGI服务器（生产环境）
-gevent>=22.0.0             # 协程支持（提升并发）
+# 多核性能支持
+gunicorn>=21.0.0           # WSGI服务器（多进程部署）
+psutil>=5.9.0              # 系统监控
 
 # Core FastText library - 尝试预编译版本避免编译错误
 # 如果预编译版本不可用，会自动fallback到源码编译

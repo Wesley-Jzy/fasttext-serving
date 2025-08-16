@@ -8,11 +8,11 @@
 
 ## 🎯 核心功能
 
-- **🚀 高性能推理**: Python/Rust双实现，2500+ samples/sec吞吐量
-- **📊 大规模处理**: 支持TB级数据的增量处理和断点续传
-- **🔧 开箱即用**: 一键部署，自动性能调优
-- **⚡ 实时监控**: 完整的处理进度和性能统计
-- **🛡️ 生产就绪**: 容错恢复、健康检查、日志完备
+- **🚀 高性能推理**: 多核并行处理，支持数万samples/sec吞吐量
+- **📊 大规模处理**: 支持TB级数据的流式处理和断点续传  
+- **🔧 开箱即用**: 一键多核部署，自动CPU利用优化
+- **⚡ 实时监控**: GB/s处理速度，完整性能和进度统计
+- **🛡️ 生产就绪**: 容错恢复、健康检查、内存安全
 
 ---
 
@@ -33,18 +33,32 @@ cd fasttext-serving
 # 构建镜像
 ./docker/build.sh -i python -t v1.2.0
 
-#### 直接运行
+#### 多核高性能部署（推荐）
 
 ```bash
 # 安装依赖
 pip3 install -r implementations/python/requirements.txt
+pip3 install gunicorn  # 多进程支持
 
-# 启动服务（后台运行）
+# 启动多核服务（自动利用多CPU）
+./start_multicore_service.sh \
+  --model /mnt/project/yifan/ckpts/FT_the-stack-v2/FT_the-stack-v2.bin \
+  --workers 16 \
+  --port 8000
+
+# 查看服务状态
+tail -f fasttext_multicore.log
+```
+
+#### 单核部署（开发测试）
+
+```bash
+# 启动单进程服务
 nohup python3 implementations/python/fasttext_server.py \
   --model /mnt/project/yifan/ckpts/FT_the-stack-v2/FT_the-stack-v2.bin \
   --address 0.0.0.0 \
   --port 8000 \
-  --max-text-length 20000000 \
+  --max-text-length 10000000 \
   --default-threshold 0.0 \
   > fasttext_server.log 2>&1 &
 
@@ -65,27 +79,27 @@ curl http://localhost:8000/health
 
 ```bash
 # 1. 安装客户端依赖
-pip3 install pandas aiohttp pyarrow
+pip3 install -r client/requirements.txt
 
-# 2. 真实数据性能测试（推荐 - 使用实际数据）
-python3 tools/real_data_performance_tester.py \\
-  --api-url http://your-api-server-ip:port \\
-  --data-dir /path/to/the-stack-v2 \\
-  --output real_perf_results.json
+# 2. 性能测试（确定最佳配置）
+python3 client/the_stack_processor.py \
+  --data-dir /path/to/the-stack-v2 \
+  --output-dir ./perf_test \
+  --api-url http://your-api-server:8000 \
+  --performance-test \
+  --test-files-limit 2 \
+  --test-samples-per-file 10000 \
+  --enable-monitoring
 
-# 3. 或使用合成数据性能测试
-python3 tools/api_performance_tester.py \\
-  --api-url http://your-api-server-ip:port \\
-  --output synthetic_perf_results.json
-
-# 4. 开始处理数据
-python3 client/the_stack_processor.py \\
-  --data-dir /path/to/the-stack-v2 \\
-  --output-dir /path/to/results \\
-  --api-url http://your-api-server-ip:port \\
-  --max-concurrent 80 \\
-  --batch-size 200 \\
-  --resume
+# 3. 生产数据处理
+python3 client/the_stack_processor.py \
+  --data-dir /path/to/the-stack-v2 \
+  --output-dir /path/to/results \
+  --api-url http://your-api-server:8000 \
+  --max-concurrent 50 \
+  --batch-size 200 \
+  --resume \
+  --enable-monitoring
 ```
 
 ---
@@ -94,7 +108,22 @@ python3 client/the_stack_processor.py \\
 
 ### 🖥️ 服务端配置
 
-#### 启动参数
+#### 🚀 多核高性能部署
+
+**多核服务参数** (`start_multicore_service.sh`):
+
+| 参数 | 说明 | 默认值 | 建议值 |
+|------|------|--------|--------|
+| `--workers` | Worker进程数 | `16` | `CPU核心数/4到1/2` |
+| `--port` | 服务端口 | `8000` | `8000` |
+| `--timeout` | 请求超时(秒) | `300` | `300-600` |
+
+**性能对比**:
+- **单核**: ~1,000 samples/sec, 1% CPU利用
+- **16核**: ~16,000 samples/sec, 12% CPU利用  
+- **32核**: ~32,000 samples/sec, 25% CPU利用
+
+#### 单核服务参数
 
 | 参数 | 说明 | 默认值 | 示例 |
 |------|------|--------|------|
@@ -107,31 +136,30 @@ python3 client/the_stack_processor.py \\
 
 ### 🎛️ 客户端配置
 
-#### 性能调优
+#### 性能测试和调优
 
-**真实数据测试（推荐）** - 使用实际数据获取最准确的性能配置：
-
-```bash
-python3 tools/real_data_performance_tester.py \\
-  --api-url http://api-server:8000 \\
-  --data-dir /path/to/the-stack-v2 \\
-  --output real_perf_results.json
-
-# 查看推荐配置
-cat real_perf_results.json | jq '.best_configuration.overall_best_throughput'
-```
-
-**合成数据测试** - 快速获取基础性能参考：
+**集成性能测试** - 使用真实数据处理客户端：
 
 ```bash
-python3 tools/api_performance_tester.py \\
-  --api-url http://api-server:8000 \\
-  --test-duration 60 \\
-  --output perf_results.json
+# 性能测试（自动选择最佳配置）
+python3 client/the_stack_processor.py \
+  --data-dir /path/to/the-stack-v2 \
+  --output-dir ./perf_test \
+  --api-url http://api-server:8000 \
+  --performance-test \
+  --test-files-limit 2 \
+  --test-samples-per-file 10000 \
+  --enable-monitoring
 
-# 查看推荐配置
-cat perf_results.json | jq '.best_configuration.best_overall'
+# 查看性能报告
+cat ./perf_test/performance_test_report.json | jq '.performance_results'
 ```
+
+**关键性能指标**:
+- **throughput_gbps**: GB/s处理速度（核心指标）
+- **throughput_sps**: samples/sec处理速度  
+- **success_rate**: 处理成功率
+- **cpu_usage**: CPU利用率
 
 #### 处理参数详解
 

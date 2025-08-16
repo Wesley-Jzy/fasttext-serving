@@ -16,14 +16,26 @@ RUN apt-get update && \
 COPY fastText/ ./fastText/
 RUN cd fastText && pip install .
 
-# 安装其他依赖
-RUN pip install flask "numpy>=1.21.0,<2.0.0"
+# 复制并安装Python依赖
+COPY implementations/python/requirements.txt ./requirements.txt
+RUN pip install -r requirements.txt
 
 # 复制服务文件
 COPY implementations/python/fasttext_server.py .
+COPY start_fasttext_gunicorn.py .
+COPY start_multicore_service.sh .
+
+# 设置权限
+RUN chmod +x start_multicore_service.sh
 
 # 设置环境变量
 ENV PYTHONUNBUFFERED=1
+ENV FASTTEXT_MODEL_PATH=/app/model/model.bin
+ENV FASTTEXT_MAX_TEXT_LENGTH=10000000
+ENV FASTTEXT_DEFAULT_THRESHOLD=0.0
 
-# 默认bash启动
-CMD ["/bin/bash"]
+# 暴露端口
+EXPOSE 8000
+
+# 默认启动多核服务
+CMD ["./start_multicore_service.sh", "--model", "/app/model/model.bin", "--workers", "4"]
